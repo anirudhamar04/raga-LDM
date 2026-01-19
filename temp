@@ -1,0 +1,3 @@
+for z in datasets-*.zip; do                                                                                      ──(Mon,Jan19)─┘
+  rm "$z"
+done
