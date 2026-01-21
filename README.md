@@ -12,7 +12,10 @@ The pipeline processes audio files through multiple stages:
 4. **Chunking** - Split into 30-second segments
 5. **Energy Filtering** - Remove low-energy/drone-only clips
 6. **Raga Extraction** - Automatically extract raga information from dataset annotations
-7. **Source Separation** - Separate drums, vocals, and other instruments using Demucs
+7. **Source Separation** - Using Demucs to separate:
+   - Drums/Mridangam/Tabla (always)
+   - Accompaniment (Violin/Tanpura/other instruments) (always)
+   - Vocals (if detected)
 8. **Metadata Generation** - Create detailed CSV with all processing information
 9. **Checkpoint/Resume** - Automatically saves progress every 5 files, resume after interruption
 
@@ -71,10 +74,9 @@ python run_processing.py --dry-run
 processed/
 ├── processed_audio/           # Processed 30-second chunks (WAV)
 ├── separated/
-│   ├── drums/                # Percussion/drum tracks
-│   ├── other/                # Other accompaniments
-│   ├── vocals/               # Vocal tracks (if detected)
-│   └── instrumental/         # Full instrumental (if no vocals)
+│   ├── drums/                # Mridangam/Tabla/Percussion tracks (always)
+│   ├── accompaniment/        # Violin/Tanpura/Other instruments (always)
+│   └── vocals/               # Vocal tracks (if detected)
 └── metadata.csv              # Detailed metadata
 ```
 
@@ -83,18 +85,18 @@ processed/
 The generated `metadata.csv` includes:
 
 - `datapoint` - Path to processed audio chunk
-- `original_file` - Original source file
+- `original_file` - Relative path to original source file
+- **`original_file_path`** - Absolute path to original source file
 - `chunk_index` - Chunk number within original file
 - `duration` - Duration in seconds
 - `sample_rate` - Audio sample rate
 - **`raga`** - Raga name (automatically extracted from dataset annotations)
 - **`thaat`** - Thaat/parent scale (for Hindustani music, if applicable)
 - **`dataset_source`** - Source dataset (01-08)
-- `percussion` - Path to drum/percussion stem
+- **`drums_path`** - Path to drums/mridangam/percussion stem (always present)
+- **`accompaniment_path`** - Path to violin/tanpura/accompaniment stem (always present)
+- `vocals_path` - Path to vocals stem (if vocal detected, else empty)
 - `vocal_instrumental` - "vocal" or "instrumental"
-- `vocals_path` - Path to vocals (if vocal)
-- `other_path` - Path to other instruments
-- `instrumental_path` - Path to full instrumental (if instrumental)
 - `spectral_energy` - Energy metric for filtering
 - `processing_timestamp` - Processing timestamp
 
@@ -108,6 +110,15 @@ The pipeline automatically extracts raga information from each dataset's annotat
 - **MelodicSimilarityDataset**: From directory names
 - **Raga Ornamentation**: From filenames and CSV metadata
 - **Mridangam Tani**: Marked as "not_applicable" (percussion only)
+
+### Source Separation for Indian Classical Music
+
+The pipeline separates each audio chunk into:
+- **Drums** (Mridangam/Tabla/Percussion) - Always extracted, saved separately
+- **Accompaniment** (Violin/Tanpura/Harmonium/Other) - Always extracted, includes all melodic accompaniment
+- **Vocals** - Extracted if vocals detected
+
+For **instrumental** clips, drums are still separated from accompaniment, giving you clean percussion and accompaniment tracks.
 
 ## Documentation
 

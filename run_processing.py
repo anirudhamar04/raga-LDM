@@ -17,41 +17,36 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Process all audio files in data/ directory
-  python run_processing.py
+  # Process all audio files with data and output directories
+  python run_processing.py /path/to/data /path/to/output
   
-  # Process specific directory
-  python run_processing.py --data-dir data/04_Carnatic_varnam
+  # Process with Google Drive paths
+  python run_processing.py /content/drive/MyDrive/data /content/drive/MyDrive/output
   
   # Resume from checkpoint after interruption
-  python run_processing.py --resume
-  
-  # Custom output directory
-  python run_processing.py --output-dir my_processed_data
+  python run_processing.py /path/to/data /path/to/output --resume
   
   # Change chunk duration to 20 seconds
-  python run_processing.py --chunk-duration 20
+  python run_processing.py /path/to/data /path/to/output --chunk-duration 20
   
   # More aggressive energy filtering (remove bottom 20%)
-  python run_processing.py --energy-threshold 20
+  python run_processing.py /path/to/data /path/to/output --energy-threshold 20
   
   # Dry run (show what would be processed)
-  python run_processing.py --dry-run
+  python run_processing.py /path/to/data /path/to/output --dry-run
         """
     )
     
     parser.add_argument(
-        '--data-dir',
+        'data_dir',
         type=str,
-        default='data',
-        help='Input data directory (default: data)'
+        help='Input data directory (required)'
     )
     
     parser.add_argument(
-        '--output-dir',
+        'output_dir',
         type=str,
-        default='processed',
-        help='Output directory (default: processed)'
+        help='Output directory (required)'
     )
     
     parser.add_argument(
@@ -110,8 +105,8 @@ Examples:
     import logging
     
     # Update configuration
-    CONFIG['data_dir'] = args.data_dir
-    CONFIG['output_dir'] = args.output_dir
+    CONFIG['data_dir'] = str(Path(args.data_dir).resolve())
+    CONFIG['output_dir'] = str(Path(args.output_dir).resolve())
     CONFIG['chunk_duration'] = args.chunk_duration
     CONFIG['sample_rate'] = args.sample_rate
     CONFIG['energy_threshold_percentile'] = args.energy_threshold
@@ -134,12 +129,13 @@ Examples:
     print("=" * 80)
     
     # Check if data directory exists
-    if not Path(args.data_dir).exists():
+    data_path = Path(args.data_dir)
+    if not data_path.exists():
         print(f"\nError: Data directory not found: {args.data_dir}")
         sys.exit(1)
     
     # Find audio files
-    audio_files = find_audio_files(args.data_dir)
+    audio_files = find_audio_files(str(data_path))
     
     if not audio_files:
         print(f"\nNo audio files found in {args.data_dir}")
@@ -156,14 +152,6 @@ Examples:
         print("\nRun without --dry-run to actually process these files.")
         sys.exit(0)
     
-    # Confirm processing
-    print("\nReady to process audio files.")
-    response = input("Continue? [y/N]: ").strip().lower()
-    
-    if response != 'y':
-        print("Processing cancelled.")
-        sys.exit(0)
-    
     # Ensure directories exist
     ensure_directories()
     
@@ -177,7 +165,7 @@ Examples:
             print("\n⚠ No checkpoint found, starting fresh")
     
     # Run the pipeline
-    metadata_df = process_all_files(args.data_dir, resume=args.resume)
+    metadata_df = process_all_files(str(data_path), resume=args.resume)
     
     if metadata_df.empty:
         print("\nNo data was processed!")

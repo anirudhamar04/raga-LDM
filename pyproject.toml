@@ -118,11 +118,8 @@ dependencies = [
     "timm==0.6.12",
     "tokenizers==0.13.2",
     "tomli==2.0.1",
-    "torch==1.13.1",
-    "torchaudio==0.13.1",
     "torchlibrosa==0.1.0",
     "torchmetrics==0.11.3",
-    "torchvision==0.14.1",
     "tqdm==4.65.0",
     "transformers==4.26.1",
     "twine==4.0.2",
@@ -138,4 +135,10 @@ dependencies = [
     "zipp==3.15.0",
     "pyloudnorm>=0.1.0",
     "demucs>=4.0.0",
+    "torch>=1.13.1",
+    "torchvision>=0.14.1",
+    "torchaudio>=0.13.1",
 ]
+[tool.uv]
+required-environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]
+
