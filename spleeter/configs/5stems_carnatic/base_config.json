@@ -1,7 +1,7 @@
 {
     "train_csv": "train.csv",
     "validation_csv": "validation.csv",
-    "model_dir": "trained_models/5stems_carnatic",
+    "model_dir": "drive/MyDrive/Models/spleeter",
     "mix_name": "mix",
     "instrument_list": ["vocals", "violin", "ghatam", "mridangam", "drone"],
     "sample_rate": 44100,

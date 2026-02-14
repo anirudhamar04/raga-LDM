@@ -12,3 +12,4 @@ wheels/
 
 data/
 processed/
+trained_models/

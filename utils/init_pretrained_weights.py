@@ -33,8 +33,14 @@ def get_pretrained_model_path(model_name: str = "spleeter:4stems") -> str:
     """
     from spleeter.model.provider import ModelProvider
     
-    logger.info(f"Downloading pretrained model: {model_name}")
-    model_path = ModelProvider.default().get(model_name)
+    # Extract the actual model name (e.g., "4stems" from "spleeter:4stems")
+    if ":" in model_name:
+        actual_model_name = model_name.split(":", 1)[1]
+    else:
+        actual_model_name = model_name
+    
+    logger.info(f"Downloading pretrained model: {actual_model_name}")
+    model_path = ModelProvider.default().get(actual_model_name)
     logger.info(f"Pretrained model path: {model_path}")
     
     return model_path
