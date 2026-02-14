@@ -75,23 +75,32 @@ def create_stem_mapping(
             # Use drums for ghatam too (both are percussion)
             mapping["ghatam"] = "drums"
     
-    # Map melodic instruments
+    # Map melodic instruments - prioritize piano for violin
     if "violin" in target_stems:
-        if "other" in pretrained_stems:
+        if "piano" in pretrained_stems:
+            mapping["violin"] = "piano"
+        elif "other" in pretrained_stems:
             mapping["violin"] = "other"
         elif "bass" in pretrained_stems:
             mapping["violin"] = "bass"
     
-    # Map drone
+    # Map drone - prioritize bass
     if "drone" in target_stems:
         if "bass" in pretrained_stems:
             mapping["drone"] = "bass"
         elif "other" in pretrained_stems:
             mapping["drone"] = "other"
     
-    # Map piano to violin if present
-    if "piano" in pretrained_stems and "violin" in target_stems and "violin" not in mapping:
-        mapping["violin"] = "piano"
+    # Map remaining percussion stems
+    if "drums" in pretrained_stems:
+        # If we have multiple percussion targets, try to map them intelligently
+        percussion_targets = [s for s in target_stems if s in ["mridangam", "ghatam", "drums"]]
+        if len(percussion_targets) > 1:
+            # Map drums to the first unmapped percussion target
+            for target in percussion_targets:
+                if target not in mapping:
+                    mapping[target] = "drums"
+                    break
     
     logger.info(f"Created stem mapping: {mapping}")
     return mapping
@@ -180,7 +189,7 @@ def map_checkpoint_variables(
 
 
 def initialize_from_pretrained(
-    pretrained_model: str,
+    pretrained_model: Optional[str],
     target_config_path: str,
     output_model_dir: str,
     stem_mapping: Optional[Dict[str, str]] = None
@@ -189,7 +198,7 @@ def initialize_from_pretrained(
     Initialize a new model from a pretrained Spleeter model.
     
     Args:
-        pretrained_model: Name or path of the pretrained model
+        pretrained_model: Name or path of the pretrained model. If None, auto-detects based on target stems.
         target_config_path: Path to the target model configuration
         output_model_dir: Directory to save the initialized model
         stem_mapping: Optional custom stem mapping. If None, automatic mapping is used.
@@ -202,6 +211,23 @@ def initialize_from_pretrained(
         target_config = json.load(f)
     
     target_stems = target_config['instrument_list']
+    num_target_stems = len(target_stems)
+    
+    # Auto-detect pretrained model if not specified
+    if pretrained_model is None or pretrained_model == "":
+        if num_target_stems == 5:
+            pretrained_model = "spleeter:5stems"
+            logger.info(f"Auto-detected 5 stems in target, using {pretrained_model}")
+        elif num_target_stems == 4:
+            pretrained_model = "spleeter:4stems"
+            logger.info(f"Auto-detected 4 stems in target, using {pretrained_model}")
+        elif num_target_stems == 2:
+            pretrained_model = "spleeter:2stems"
+            logger.info(f"Auto-detected 2 stems in target, using {pretrained_model}")
+        else:
+            # Default to 5stems for better initialization
+            pretrained_model = "spleeter:5stems"
+            logger.info(f"Using default {pretrained_model} for {num_target_stems} stems")
     
     # Get pretrained model path
     if pretrained_model.startswith("spleeter:"):
@@ -261,8 +287,8 @@ def main():
     parser.add_argument(
         "--pretrained_model",
         type=str,
-        default="spleeter:4stems",
-        help="Pretrained model name or path (default: spleeter:4stems)"
+        default=None,
+        help="Pretrained model name or path (default: auto-detect based on target config, prefers 5stems for 5-stem models)"
     )
     parser.add_argument(
         "--config",
