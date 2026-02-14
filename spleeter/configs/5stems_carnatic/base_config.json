@@ -1,6 +1,6 @@
 {
-    "train_csv": "path/to/train.csv",
-    "validation_csv": "path/to/validation.csv",
+    "train_csv": "train.csv",
+    "validation_csv": "validation.csv",
     "model_dir": "trained_models/5stems_carnatic",
     "mix_name": "mix",
     "instrument_list": ["vocals", "violin", "ghatam", "mridangam", "drone"],
