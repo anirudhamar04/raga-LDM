@@ -504,13 +504,14 @@ class DatasetBuilder(object):
             Any:
                 Cached dataset if needed, original dataset otherwise.
         """
-        if cache is not None:
+        if cache is not None and cache.strip():
             if wait:
                 while not exists(f"{cache}.index"):
                     logger.info(f"Cache not available, wait {self.WAIT_PERIOD}")
                     time.sleep(self.WAIT_PERIOD)
             cache_path = os.path.split(cache)[0]
-            os.makedirs(cache_path, exist_ok=True)
+            if cache_path:
+                os.makedirs(cache_path, exist_ok=True)
             return dataset.cache(cache)
         return dataset
 

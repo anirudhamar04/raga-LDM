@@ -262,8 +262,12 @@ def initialize_from_pretrained(
     
     # Copy configuration to output directory
     output_config_path = os.path.join(output_model_dir, "params.json")
-    shutil.copy(target_config_path, output_config_path)
-    logger.info(f"Copied configuration to: {output_config_path}")
+    # Only copy if source and destination are different
+    if os.path.abspath(target_config_path) != os.path.abspath(output_config_path):
+        shutil.copy(target_config_path, output_config_path)
+        logger.info(f"Copied configuration to: {output_config_path}")
+    else:
+        logger.info(f"Configuration already at target location: {output_config_path}")
     
     # Map checkpoint variables
     logger.info("Mapping checkpoint variables...")
