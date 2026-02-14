@@ -13,3 +13,4 @@ wheels/
 data/
 processed/
 trained_models/
+pretrained_models/
