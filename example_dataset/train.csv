@@ -1,0 +1,4 @@
+mix_path,vocals_path,violin_path,ghatam_path,mridangam_path,drone_path,duration
+audio/song001/mix.wav,audio/song001/vocals.wav,audio/song001/violin.wav,audio/song001/ghatam.wav,audio/song001/mridangam.wav,audio/song001/drone.wav,180.5
+audio/song002/mix.wav,audio/song002/vocals.wav,audio/song002/violin.wav,audio/song002/ghatam.wav,audio/song002/mridangam.wav,audio/song002/drone.wav,205.3
+audio/song003/mix.wav,audio/song003/vocals.wav,audio/song003/violin.wav,audio/song003/ghatam.wav,audio/song003/mridangam.wav,audio/song003/drone.wav,192.7

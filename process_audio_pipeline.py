@@ -7,7 +7,7 @@ This script processes audio files through multiple stages:
 3. Silence trimming
 4. Chunking to 30-second segments
 5. Low-energy/drone filtering
-6. Source separation using Demucs
+6. Source separation using fine-tuned Spleeter (5 stems: vocals, violin, ghatam, mridangam, drone)
 7. Metadata CSV generation
 """
 
@@ -48,21 +48,11 @@ CONFIG = {
     'output_dir': 'processed',
     'data_dir': 'data',
     'num_workers': None,  # None = use all CPU cores
-    'gpu_batch_size': 8,  # Batch size for GPU source separation
+    'gpu_batch_size': 8,  # Batch size for GPU source separation (not used for Spleeter)
     'max_workers_files': None,  # Max workers for file processing (None = auto)
-    'two_pass_separation': True,  # Use two-pass ensemble for better drum separation
-    'drum_combination_weight': 0.7,  # Weight for first pass drums (0.7) vs second pass (0.3)
-    'use_model_ensemble': True,  # Use ensemble of Demucs + MDX-Net for better separation
-    'mdx_model': 'mdx_extra',  # MDX model to use ('mdx_extra', 'mdx', etc.)
-    'fusion_method': 'weighted_transient',  # 'max_tf', 'weighted_transient', or 'average'
-    'mdx_weight': 0.4,  # Weight for MDX drums in fusion (0.4) vs Demucs (0.6)
-    'separation_shifts': 5,  # Number of shifts for equivariant stabilization (1-10, higher=better quality but slower)
-    'separation_overlap': 0.25,  # Overlap between chunks (0.0-1.0)
-    'use_wiener_filtering': True,  # Apply Wiener filtering for residual suppression
-    'use_spectral_gating': True,  # Apply spectral gating to remove artifacts
-    'use_cross_stem_consistency': True,  # Ensure stems sum to original (energy balance)
-    'freq_dependent_fusion': True,  # Use frequency-dependent fusion weights
-    'artifact_threshold_db': -40,  # Threshold for artifact detection in dB
+    # Spleeter 5-stem model configuration
+    'spleeter_model_dir': 'trained_models/5stems_carnatic',  # Path to your trained Spleeter model
+    'spleeter_stems': ['vocals', 'violin', 'ghatam', 'mridangam', 'drone'],  # 5 stems from trained model
 }
 
 
@@ -71,9 +61,11 @@ def ensure_directories():
     dirs = [
         Path(CONFIG['output_dir']),
         Path(CONFIG['output_dir']) / 'processed_audio',
-        Path(CONFIG['output_dir']) / 'separated' / 'drums',
-        Path(CONFIG['output_dir']) / 'separated' / 'accompaniment',
         Path(CONFIG['output_dir']) / 'separated' / 'vocals',
+        Path(CONFIG['output_dir']) / 'separated' / 'violin',
+        Path(CONFIG['output_dir']) / 'separated' / 'ghatam',
+        Path(CONFIG['output_dir']) / 'separated' / 'mridangam',
+        Path(CONFIG['output_dir']) / 'separated' / 'drone',
     ]
     for d in dirs:
         d.mkdir(parents=True, exist_ok=True)
@@ -380,6 +372,216 @@ def extract_raga_ornamentation(file_path: Path) -> str:
         return 'unknown'
 
 
+# Global cache for Excel metadata
+_cmr_metadata_cache = None
+_hmr_metadata_cache = None
+
+
+def _load_cmr_metadata():
+    """Load CMR dataset metadata from Excel file (cached)."""
+    global _cmr_metadata_cache
+    if _cmr_metadata_cache is None:
+        try:
+            excel_path = Path(CONFIG['data_dir']) / '09_CMR_full_dataset_1.0' / 'CMRfullDataset.xlsx'
+            if excel_path.exists():
+                df = pd.read_excel(excel_path)
+                # Create lookup dictionary: UID -> Raaga
+                _cmr_metadata_cache = {}
+                for _, row in df.iterrows():
+                    uid = str(row.get('UID', ''))
+                    raaga = row.get('Raaga', '')
+                    if uid and pd.notna(raaga):
+                        _cmr_metadata_cache[uid] = str(raaga).strip()
+                logger.info(f"Loaded {len(_cmr_metadata_cache)} CMR metadata entries")
+            else:
+                _cmr_metadata_cache = {}
+                logger.warning(f"CMR Excel file not found: {excel_path}")
+        except Exception as e:
+            logger.warning(f"Error loading CMR metadata: {e}")
+            _cmr_metadata_cache = {}
+    return _cmr_metadata_cache
+
+
+def _load_hmr_metadata():
+    """Load HMR dataset metadata from Excel file (cached)."""
+    global _hmr_metadata_cache
+    if _hmr_metadata_cache is None:
+        try:
+            excel_path = Path(CONFIG['data_dir']) / '10_HMR_1.0' / 'HMDf.xlsx'
+            if excel_path.exists():
+                df = pd.read_excel(excel_path)
+                # Create lookup dictionary: UID -> Raag
+                _hmr_metadata_cache = {}
+                for _, row in df.iterrows():
+                    uid = str(row.get('UID', ''))
+                    raag = row.get('Raag', '')
+                    if uid and pd.notna(raag):
+                        _hmr_metadata_cache[uid] = str(raag).strip()
+                logger.info(f"Loaded {len(_hmr_metadata_cache)} HMR metadata entries")
+            else:
+                _hmr_metadata_cache = {}
+                logger.warning(f"HMR Excel file not found: {excel_path}")
+        except Exception as e:
+            logger.warning(f"Error loading HMR metadata: {e}")
+            _hmr_metadata_cache = {}
+    return _hmr_metadata_cache
+
+
+def extract_raga_cmr(file_path: Path) -> str:
+    """
+    Extract raga from CMR (Carnatic Music Rhythm) dataset.
+    
+    Raga is stored in Excel file (CMRfullDataset.xlsx) with UID as key.
+    Audio filenames: {UID}_{track}_{name}.wav
+    
+    Args:
+        file_path: Path to audio file
+        
+    Returns:
+        Raga name or 'unknown'
+    """
+    try:
+        filename = file_path.stem
+        # Extract UID from filename (first part before underscore)
+        # Pattern: 10011_3_Bantureethi.wav -> UID = 10011
+        parts = filename.split('_')
+        if parts:
+            uid = parts[0]
+            metadata = _load_cmr_metadata()
+            raaga = metadata.get(uid, 'unknown')
+            if raaga and raaga != 'unknown':
+                return raaga
+        return 'unknown'
+    except Exception as e:
+        logger.debug(f"Error extracting raga from CMR: {e}")
+        return 'unknown'
+
+
+def extract_raga_hmr(file_path: Path) -> str:
+    """
+    Extract raga from HMR (Hindustani Music Rhythm) dataset.
+    
+    Raga is stored in Excel file (HMDf.xlsx) with UID as key.
+    Audio filenames can have UID in different positions:
+    - {prefix}_{UID}_{track}_{taal}_Raga_{raga_name}.wav
+    - {UID}_{track}_{taal}_Raga_{raga_name}.wav
+    
+    Args:
+        file_path: Path to audio file
+        
+    Returns:
+        Raga name or 'unknown'
+    """
+    try:
+        filename = file_path.stem
+        # Try to extract UID from filename
+        # Pattern 1: 49_20049_1_08_Raga_Gorakh_Kalyan... -> UID = 20049
+        # Pattern 2: 20049_1_08_Raga_Gorakh_Kalyan... -> UID = 20049
+        parts = filename.split('_')
+        
+        # Look for UID (5-digit number starting with 2)
+        uid = None
+        for part in parts:
+            if part.isdigit() and len(part) == 5 and part.startswith('2'):
+                uid = part
+                break
+        
+        if uid:
+            metadata = _load_hmr_metadata()
+            raag = metadata.get(uid, 'unknown')
+            if raag and raag != 'unknown':
+                return raag
+        
+        # Fallback: try to extract from filename if it contains "Raga" or "Raag"
+        filename_lower = filename.lower()
+        if 'raga' in filename_lower or 'raag' in filename_lower:
+            # Find position of "raga" or "raag"
+            raga_idx = -1
+            if 'raga' in filename_lower:
+                raga_idx = filename_lower.index('raga')
+            elif 'raag' in filename_lower:
+                raga_idx = filename_lower.index('raag')
+            
+            if raga_idx >= 0:
+                # Extract text after "raga"/"raag" until next underscore or end
+                after_raga = filename[raga_idx:].split('_')
+                if len(after_raga) > 1:
+                    # Get raga name (skip "raga"/"raag" itself)
+                    raga_parts = after_raga[1:]
+                    # Take first few meaningful parts (stop at common words like "Fast", "Gat", "in", etc.)
+                    stop_words = {'fast', 'gat', 'in', 'vilambit', 'drut', 'teental', 'tintala', 'jhaptal', 'rupak', 'ek'}
+                    raga_name_parts = []
+                    for part in raga_parts:
+                        if part.lower() in stop_words:
+                            break
+                        raga_name_parts.append(part)
+                    if raga_name_parts:
+                        return '_'.join(raga_name_parts).replace('__', '_').strip('_')
+        
+        return 'unknown'
+    except Exception as e:
+        logger.debug(f"Error extracting raga from HMR: {e}")
+        return 'unknown'
+
+
+def extract_raga_ragadataset(file_path: Path) -> str:
+    """
+    Extract raga from RagaDataset (dataset 11).
+    
+    Files are in nested directories: {uuid}/{Artist}/{Album}/{Song}/{Song}.mp3
+    Raga information may be in:
+    1. Filename itself (if raga name is part of song name)
+    2. Path structure (if raga is encoded in directory names)
+    
+    Common Carnatic ragas to look for in filename/path.
+    
+    Args:
+        file_path: Path to audio file
+        
+    Returns:
+        Raga name or 'unknown'
+    """
+    try:
+        # Get full path as string for searching
+        path_str = str(file_path).lower()
+        filename = file_path.stem.lower()
+        
+        # Common Carnatic ragas (expanded list)
+        common_ragas = [
+            'shankarabharanam', 'kalyani', 'thodi', 'bhairavi', 'kharaharapriya',
+            'harikambhoji', 'natabhairavi', 'mayamalavagowla', 'dharmavati',
+            'varali', 'charukesi', 'sahana', 'kamboji', 'begada', 'mohanam',
+            'hindolam', 'shubhapantuvarali', 'kamas', 'vasantha', 'sri', 'madhyamavati',
+            'pantuvarali', 'shanmukhapriya', 'simhendramadhyamam', 'hemavati',
+            'chakravakam', 'suryakantam', 'latangi', 'vachaspati', 'mechakalyani',
+            'chitrambari', 'sucharitra', 'jyotiswarupini', 'dhatuvardhani',
+            'ganamurthi', 'vagadheeswari', 'gulakambari', 'bhavapriya', 'shubhapantuvarali',
+            'yagapriya', 'ragavardhani', 'gangeyabhushani', 'vagadheeswari',
+            'sulini', 'chalanata', 'salagam', 'jalarnavam', 'jhalavarali', 'navaneetam',
+            'pavani', 'raghupriya', 'gavambhodi', 'bhavani', 'shubhapantuvarali',
+            'suvarnangi', 'divyamani', 'dhavalambari', 'namanarayani', 'kamavardhani',
+            'ramapriya', 'gamanashrama', 'vishwambari', 'shyamalangi', 'shanmukhapriya',
+            'simhendramadhyamam', 'hemavati', 'dharmavati', 'neetimati', 'kantamani',
+            'rishabhapriya', 'latangi', 'vachaspati', 'mechakalyani', 'chitrambari',
+            'sucharitra', 'jyotiswarupini', 'dhatuvardhani', 'ganamurthi', 'vagadheeswari'
+        ]
+        
+        # Search in filename first (more likely to contain raga)
+        for raga in common_ragas:
+            if raga in filename:
+                return raga.capitalize()
+        
+        # Search in full path (including directory names)
+        for raga in common_ragas:
+            if raga in path_str:
+                return raga.capitalize()
+        
+        return 'unknown'
+    except Exception as e:
+        logger.debug(f"Error extracting raga from RagaDataset: {e}")
+        return 'unknown'
+
+
 def determine_dataset_source(file_path: Path, data_dir: str) -> str:
     """
     Determine which dataset the file belongs to based on path.
@@ -389,16 +591,16 @@ def determine_dataset_source(file_path: Path, data_dir: str) -> str:
         data_dir: Root data directory
         
     Returns:
-        Dataset identifier (01-08) or 'unknown'
+        Dataset identifier (01-11) or 'unknown'
     """
     try:
         path_str = str(file_path)
         
-        if '01_saraga_carnatic' in path_str or 'saraga' in path_str.lower() and 'carnatic' in path_str.lower():
+        if '01_saraga_carnatic' in path_str or ('saraga' in path_str.lower() and 'carnatic' in path_str.lower() and 'hindustani' not in path_str.lower()):
             return '01_saraga_carnatic'
         elif '02_Indian-Music-Raga' in path_str or 'indian-music-raga' in path_str.lower():
             return '02_Indian-Music-Raga'
-        elif '03_Saraga_hindustani' in path_str or 'saraga' in path_str.lower() and 'hindustani' in path_str.lower():
+        elif '03_Saraga_hindustani' in path_str or ('saraga' in path_str.lower() and 'hindustani' in path_str.lower()):
             return '03_Saraga_hindustani'
         elif '04_Carnatic_varnam' in path_str or 'carnatic_varnam' in path_str.lower():
             return '04_Carnatic_varnam'
@@ -410,6 +612,12 @@ def determine_dataset_source(file_path: Path, data_dir: str) -> str:
             return '07_MelodicSimilarityDataset'
         elif '08_raga_ornamentation_dataset' in path_str or 'ornamentation' in path_str.lower():
             return '08_raga_ornamentation_dataset'
+        elif '09_CMR_full_dataset' in path_str or 'CMR_full_dataset' in path_str:
+            return '09_CMR_full_dataset_1.0'
+        elif '10_HMR_1.0' in path_str or 'HMR_1.0' in path_str:
+            return '10_HMR_1.0'
+        elif '11_RagaDataset' in path_str or 'RagaDataset' in path_str:
+            return '11_RagaDataset'
         else:
             return 'unknown'
     except Exception as e:
@@ -461,6 +669,15 @@ def extract_raga_from_path(file_path: Path, data_dir: str = 'data') -> Dict[str,
         
         elif dataset == '08_raga_ornamentation_dataset':
             result['raga'] = extract_raga_ornamentation(file_path)
+        
+        elif dataset == '09_CMR_full_dataset_1.0':
+            result['raga'] = extract_raga_cmr(file_path)
+        
+        elif dataset == '10_HMR_1.0':
+            result['raga'] = extract_raga_hmr(file_path)
+        
+        elif dataset == '11_RagaDataset':
+            result['raga'] = extract_raga_ragadataset(file_path)
         
         logger.debug(f"Extracted raga info for {file_path.name}: {result}")
         
@@ -770,54 +987,59 @@ def detect_vocals(vocal_stem: np.ndarray, other_stems: np.ndarray, threshold_rat
 
 
 # Global model cache for batch processing
-_global_demucs_model = None
-_global_mdx_model = None
-_global_device = None
+_global_spleeter_separator = None
+_spleeter_model_dir = "trained_models/5stems_carnatic"  # Path to your trained model
 
-def get_demucs_model(device='cuda'):
-    """Get or create Demucs model (cached globally)."""
-    global _global_demucs_model, _global_device
-    if _global_demucs_model is None or _global_device != device:
-        import torch
-        from demucs.pretrained import get_model
-        _global_demucs_model = get_model('htdemucs')
-        _global_demucs_model.eval()
-        if device == 'cuda' and torch.cuda.is_available():
-            _global_demucs_model = _global_demucs_model.to(device)
-            # Optimize for A100
-            if hasattr(torch, 'compile') and torch.cuda.get_device_capability()[0] >= 8:
-                try:
-                    _global_demucs_model = torch.compile(_global_demucs_model, mode='reduce-overhead')
-                    logger.info("Demucs model compiled with torch.compile for A100 optimization")
-                except Exception as e:
-                    logger.warning(f"Could not compile Demucs model: {e}")
-        _global_device = device
-    return _global_demucs_model
-
-
-def get_mdx_model(model_name='mdx_extra', device='cuda'):
-    """Get or create MDX-Net model (cached globally)."""
-    global _global_mdx_model, _global_device
-    if _global_mdx_model is None or _global_device != device:
-        import torch
-        from demucs.pretrained import get_model
+def get_spleeter_separator(model_dir: str = None):
+    """Get or create Spleeter separator (cached globally)."""
+    global _global_spleeter_separator, _spleeter_model_dir
+    
+    if model_dir is not None:
+        _spleeter_model_dir = model_dir
+    
+    if _global_spleeter_separator is None:
         try:
-            _global_mdx_model = get_model(model_name)
-            _global_mdx_model.eval()
-            if device == 'cuda' and torch.cuda.is_available():
-                _global_mdx_model = _global_mdx_model.to(device)
-                # Optimize for A100
-                if hasattr(torch, 'compile') and torch.cuda.get_device_capability()[0] >= 8:
-                    try:
-                        _global_mdx_model = torch.compile(_global_mdx_model, mode='reduce-overhead')
-                        logger.info("MDX model compiled with torch.compile for A100 optimization")
-                    except Exception as e:
-                        logger.warning(f"Could not compile MDX model: {e}")
-            _global_device = device
+            sys.path.insert(0, str(Path(__file__).parent / "spleeter"))
+            from spleeter.separator import Separator
+            
+            logger.info(f"Loading Spleeter model from: {_spleeter_model_dir}")
+            _global_spleeter_separator = Separator(_spleeter_model_dir, MWF=False)
+            logger.info("Spleeter 5-stem model loaded successfully")
         except Exception as e:
-            logger.warning(f"Could not load MDX model {model_name}: {e}")
-            return None
-    return _global_mdx_model
+            logger.error(f"Failed to load Spleeter model: {e}")
+            logger.error("Make sure the trained model exists at the specified path")
+            raise
+    
+    return _global_spleeter_separator
+
+
+def combine_percussion_stems(ghatam: np.ndarray, mridangam: np.ndarray, sr: int) -> np.ndarray:
+    """
+    Combine ghatam and mridangam stems into a single percussion stem.
+    
+    Args:
+        ghatam: Ghatam stem audio
+        mridangam: Mridangam stem audio
+        sr: Sample rate
+        
+    Returns:
+        Combined percussion stem
+    """
+    # Convert to mono if needed
+    if ghatam.ndim > 1:
+        ghatam = ghatam.mean(axis=0)
+    if mridangam.ndim > 1:
+        mridangam = mridangam.mean(axis=0)
+    
+    # Ensure same length
+    min_len = min(len(ghatam), len(mridangam))
+    ghatam = ghatam[:min_len]
+    mridangam = mridangam[:min_len]
+    
+    # Simple addition (can be weighted if needed)
+    percussion = ghatam + mridangam
+    
+    return percussion
 
 
 def fuse_drums_tf_max(drums_demucs: np.ndarray, drums_mdx: np.ndarray, sr: int) -> np.ndarray:
@@ -1114,13 +1336,14 @@ def apply_frequency_dependent_fusion(drums_demucs: np.ndarray, drums_mdx: np.nda
 
 def separate_sources_batch(audio_paths: List[Path]) -> List[Dict[str, Optional[Path]]]:
     """
-    Perform ensemble source separation on a batch of audio files using GPU.
+    Perform source separation on a batch of audio files using fine-tuned Spleeter.
     
-    Process:
-    1. Ensemble separation: Run both Demucs (HTDemucs) and MDX-Net models in parallel
-    2. Fusion: Combine drums using TF-domain fusion (max or weighted transient)
-    3. Two-pass refinement: Re-separate accompaniment to extract missed drums
-    4. Final combination: Merge all drum sources
+    Separates audio into 5 stems:
+    - vocals
+    - violin
+    - ghatam (percussion)
+    - mridangam (percussion)
+    - drone
     
     Args:
         audio_paths: List of paths to processed audio files
@@ -1129,365 +1352,154 @@ def separate_sources_batch(audio_paths: List[Path]) -> List[Dict[str, Optional[P
         List of dictionaries with paths to separated stems
     """
     try:
-        import torch
-        from demucs.apply import apply_model
-        
-        if torch.cuda.is_available():
-            device = 'cuda'
-            # Clear cache before processing
-            torch.cuda.empty_cache()
-            logger.debug(f"Using GPU: {torch.cuda.get_device_name(0)}")
-        else:
-            device = 'cpu'
-            logger.warning("CUDA not available, using CPU for batch processing")
-        
-        # Get cached models
-        demucs_model = get_demucs_model(device)
-        use_ensemble = CONFIG.get('use_model_ensemble', True)
-        mdx_model = None
-        if use_ensemble:
-            mdx_model_name = CONFIG.get('mdx_model', 'mdx_extra')
-            mdx_model = get_mdx_model(mdx_model_name, device)
-            if mdx_model is None:
-                logger.warning("MDX model not available, falling back to Demucs only")
-                use_ensemble = False
+        # Get Spleeter separator
+        separator = get_spleeter_separator()
         
         results = []
         
-        # Process in batches
-        batch_size = CONFIG.get('gpu_batch_size', 8)
-        for batch_start in range(0, len(audio_paths), batch_size):
-            batch_paths = audio_paths[batch_start:batch_start + batch_size]
-            batch_audio = []
-            batch_srs = []
-            batch_original_lengths = []
+        # Process each file (Spleeter doesn't support true batch processing)
+        for audio_path in audio_paths:
+            logger.info(f"Separating {audio_path.name}...")
             
-            # Load all audio in batch
-            for audio_path in batch_paths:
-                audio, sr = librosa.load(audio_path, sr=44100, mono=False)
+            try:
+                # Load audio
+                audio, sr = librosa.load(str(audio_path), sr=44100, mono=False)
                 if audio.ndim == 1:
                     audio = np.stack([audio, audio])
-                original_length = audio.shape[-1]
-                batch_audio.append(audio)
-                batch_srs.append(sr)
-                batch_original_lengths.append(original_length)
-            
-            # ========== FIRST PASS: Initial separation with Demucs ==========
-            # Stack into batch tensor (pad to same length)
-            max_length = max(a.shape[-1] for a in batch_audio)
-            batch_tensor = []
-            for audio in batch_audio:
-                if audio.shape[-1] < max_length:
-                    padding = max_length - audio.shape[-1]
-                    audio = np.pad(audio, ((0, 0), (0, padding)), mode='constant')
-                batch_tensor.append(audio)
-            
-            batch_tensor = np.stack(batch_tensor)
-            audio_tensor = torch.from_numpy(batch_tensor).float()
-            
-            if device == 'cuda':
-                audio_tensor = audio_tensor.to(device)
-            
-            # Get separation parameters from config
-            shifts = CONFIG.get('separation_shifts', 5)
-            overlap = CONFIG.get('separation_overlap', 0.25)
-            
-            # Apply Demucs model to batch
-            with torch.no_grad():
-                sources_demucs = apply_model(
-                    demucs_model, 
-                    audio_tensor, 
-                    device=device, 
-                    shifts=shifts, 
-                    split=True, 
-                    overlap=overlap
-                )
-            
-            # Apply MDX model if ensemble is enabled
-            sources_mdx = None
-            if use_ensemble and mdx_model is not None:
-                with torch.no_grad():
-                    sources_mdx = apply_model(
-                        mdx_model,
-                        audio_tensor,
-                        device=device,
-                        shifts=shifts,
-                        split=True,
-                        overlap=overlap
-                    )
-                logger.debug(f"Applied MDX model for ensemble separation on batch")
-            
-            # Clear GPU cache after first pass
-            if device == 'cuda':
-                torch.cuda.empty_cache()
-            
-            # Clear GPU cache after first pass
-            if device == 'cuda':
-                torch.cuda.empty_cache()
-            
-            # ========== SECOND PASS: Re-separate accompaniment ==========
-            # Prepare accompaniment stems for second pass
-            use_two_pass = CONFIG.get('two_pass_separation', True)
-            accompaniment_batch = []
-            accompaniment_indices = []
-            
-            if use_two_pass:
-                for idx, audio_path in enumerate(batch_paths):
-                    original_length = batch_original_lengths[idx]
-                    # Get Demucs stems for second pass preparation
-                    stems_demucs_temp = {
-                        'drums': sources_demucs[idx][0][:, :original_length].cpu().numpy(),
-                        'bass': sources_demucs[idx][1][:, :original_length].cpu().numpy(),
-                        'other': sources_demucs[idx][2][:, :original_length].cpu().numpy(),
-                        'vocals': sources_demucs[idx][3][:, :original_length].cpu().numpy(),
-                    }
-                    
-                    # Create initial accompaniment (bass + other) for second pass
-                    # Note: This will be cleaned later after ensemble fusion
-                    accompaniment = stems_demucs_temp['bass'] + stems_demucs_temp['other']
-                    
-                    # Only process if accompaniment has significant energy
-                    accompaniment_energy = np.sum(accompaniment ** 2)
-                    if accompaniment_energy > 1e-6:  # Threshold to avoid processing silence
-                        accompaniment_batch.append(accompaniment)
-                        accompaniment_indices.append(idx)
-            
-            # Process accompaniment in second pass if we have any
-            drums_pass2_dict = {}
-            if use_two_pass and accompaniment_batch:
-                # Stack accompaniment for batch processing
-                max_length_acc = max(a.shape[-1] for a in accompaniment_batch)
-                acc_tensor_list = []
-                for acc in accompaniment_batch:
-                    if acc.shape[-1] < max_length_acc:
-                        padding = max_length_acc - acc.shape[-1]
-                        acc = np.pad(acc, ((0, 0), (0, padding)), mode='constant')
-                    acc_tensor_list.append(acc)
                 
-                acc_tensor = np.stack(acc_tensor_list)
-                acc_tensor_torch = torch.from_numpy(acc_tensor).float()
+                # Save to temporary file for Spleeter (it requires file input)
+                temp_audio_path = Path(CONFIG['output_dir']) / 'temp_audio.wav'
+                sf.write(temp_audio_path, audio.T, sr)
                 
-                if device == 'cuda':
-                    acc_tensor_torch = acc_tensor_torch.to(device)
+                # Perform separation using Spleeter
+                # Spleeter outputs to a directory structure
+                temp_output_dir = Path(CONFIG['output_dir']) / 'temp_separated'
+                temp_output_dir.mkdir(exist_ok=True)
                 
-                # Apply model to accompaniment (second pass) - use Demucs model
-                with torch.no_grad():
-                    sources_pass2 = apply_model(
-                        demucs_model,
-                        acc_tensor_torch,
-                        device=device,
-                        shifts=1,
-                        split=True,
-                        overlap=0.25
-                    )
-                
-                # Extract drums from second pass
-                for batch_idx, orig_idx in enumerate(accompaniment_indices):
-                    original_length = batch_original_lengths[orig_idx]
-                    # Get drums from second pass (these are drums that were missed in first pass)
-                    drums_pass2 = sources_pass2[batch_idx][0][:, :original_length].cpu().numpy()
-                    drums_pass2_dict[orig_idx] = drums_pass2
-                
-                # Clear GPU cache after second pass
-                if device == 'cuda':
-                    torch.cuda.empty_cache()
-            
-            # ========== COMBINE RESULTS ==========
-            # Process each item in batch
-            for idx, audio_path in enumerate(batch_paths):
-                original_length = batch_original_lengths[idx]
-                sr = batch_srs[idx]
-                
-                # Get Demucs stems
-                stems_demucs = {
-                    'drums': sources_demucs[idx][0][:, :original_length].cpu().numpy(),
-                    'bass': sources_demucs[idx][1][:, :original_length].cpu().numpy(),
-                    'other': sources_demucs[idx][2][:, :original_length].cpu().numpy(),
-                    'vocals': sources_demucs[idx][3][:, :original_length].cpu().numpy(),
-                }
-                
-                # Get MDX stems if available
-                drums_mdx = None
-                if use_ensemble and sources_mdx is not None:
-                    # MDX models typically output: drums, bass, other, vocals (same order)
-                    drums_mdx = sources_mdx[idx][0][:, :original_length].cpu().numpy()
-                
-                # Start with original accompaniment
-                accompaniment = stems_demucs['bass'] + stems_demucs['other']
-                
-                # ========== FUSE DRUMS FROM MULTIPLE SOURCES ==========
-                drums_combined = stems_demucs['drums'].copy()
-                
-                # First: Combine with MDX if ensemble is enabled
-                if drums_mdx is not None:
-                    fusion_method = CONFIG.get('fusion_method', 'weighted_transient')
-                    mdx_weight = CONFIG.get('mdx_weight', 0.4)
-                    use_freq_dep = CONFIG.get('freq_dependent_fusion', True)
-                    
-                    if use_freq_dep and fusion_method != 'max_tf':
-                        # Use frequency-dependent fusion for better quality
-                        drums_combined = apply_frequency_dependent_fusion(
-                            stems_demucs['drums'], drums_mdx, sr, mdx_weight
-                        )
-                        logger.debug(f"Fused drums using frequency-dependent fusion for {audio_path.stem}")
-                    elif fusion_method == 'max_tf':
-                        drums_combined = fuse_drums_tf_max(stems_demucs['drums'], drums_mdx, sr)
-                    elif fusion_method == 'weighted_transient':
-                        drums_combined = fuse_drums_weighted_transient(
-                            stems_demucs['drums'], drums_mdx, sr, mdx_weight
-                        )
-                    else:  # 'average'
-                        drums_combined = fuse_drums_average(
-                            stems_demucs['drums'], drums_mdx, sr, mdx_weight
-                        )
-                    logger.debug(f"Fused drums from Demucs and MDX using {fusion_method} for {audio_path.stem}")
-                    
-                    # Remove fused drums from accompaniment to get cleaner accompaniment
-                    # Convert drums_combined to same shape as accompaniment if needed
-                    if drums_combined.ndim == 1 and accompaniment.ndim > 1:
-                        drums_combined_stereo = np.stack([drums_combined, drums_combined])
-                    elif drums_combined.ndim > 1 and accompaniment.ndim == 1:
-                        drums_combined_stereo = drums_combined.mean(axis=0)
-                    else:
-                        drums_combined_stereo = drums_combined
-                    
-                    # Ensure same length
-                    min_len = min(accompaniment.shape[-1], drums_combined_stereo.shape[-1])
-                    accompaniment = accompaniment[..., :min_len]
-                    drums_combined_stereo = drums_combined_stereo[..., :min_len]
-                    
-                    # Subtract fused drums from accompaniment
-                    accompaniment = accompaniment - 0.5 * drums_combined_stereo  # Use 0.5 weight to avoid over-subtraction
-                    # Ensure non-negative (prevent phase issues)
-                    accompaniment = np.maximum(accompaniment, -np.abs(accompaniment) * 0.3)
-                    logger.debug(f"Removed fused drums from accompaniment for {audio_path.stem}")
-                
-                # Second: Combine with second pass drums if two-pass is enabled
-                weight_pass1 = CONFIG.get('drum_combination_weight', 0.7)
-                weight_pass2 = 1.0 - weight_pass1
-                
-                if idx in drums_pass2_dict:
-                    drums_pass2 = drums_pass2_dict[idx]
-                    # Add drums from second pass (weighted combination)
-                    drums_combined = weight_pass1 * drums_combined + weight_pass2 * drums_pass2
-                    logger.debug(f"Combined drums from two passes for {audio_path.stem}")
-                    
-                    # Further clean accompaniment by removing second pass drums
-                    if drums_pass2.ndim == 1 and accompaniment.ndim > 1:
-                        drums_pass2_stereo = np.stack([drums_pass2, drums_pass2])
-                    elif drums_pass2.ndim > 1 and accompaniment.ndim == 1:
-                        drums_pass2_stereo = drums_pass2.mean(axis=0)
-                    else:
-                        drums_pass2_stereo = drums_pass2
-                    
-                    # Ensure same length
-                    min_len = min(accompaniment.shape[-1], drums_pass2_stereo.shape[-1])
-                    accompaniment = accompaniment[..., :min_len]
-                    drums_pass2_stereo = drums_pass2_stereo[..., :min_len]
-                    
-                    # Subtract second pass drums from accompaniment
-                    accompaniment = accompaniment - weight_pass2 * drums_pass2_stereo
-                    # Ensure non-negative (prevent phase issues)
-                    accompaniment = np.maximum(accompaniment, -np.abs(accompaniment) * 0.3)
-                    logger.debug(f"Removed second pass drums from accompaniment for {audio_path.stem}")
-                
-                # Detect if vocals are present (use Demucs vocals)
-                has_vocals = detect_vocals(
-                    stems_demucs['vocals'].mean(axis=0) if stems_demucs['vocals'].ndim > 1 else stems_demucs['vocals'],
-                    accompaniment.mean(axis=0) if accompaniment.ndim > 1 else accompaniment
+                # Run Spleeter separation
+                separator.separate_to_file(
+                    str(temp_audio_path),
+                    str(temp_output_dir),
+                    synchronous=True
                 )
                 
-                # Save stems
+                # Load separated stems from Spleeter output
+                base_name = temp_audio_path.stem
+                separated_dir = temp_output_dir / base_name
+                
+                # Read all 5 stems
+                stems = {}
+                stem_names = ['vocals', 'violin', 'ghatam', 'mridangam', 'drone']
+                
+                for stem_name in stem_names:
+                    stem_file = separated_dir / f"{stem_name}.wav"
+                    if stem_file.exists():
+                        stem_audio, _ = librosa.load(str(stem_file), sr=sr, mono=True)
+                        stems[stem_name] = stem_audio
+                    else:
+                        logger.warning(f"Stem not found: {stem_file}")
+                        stems[stem_name] = np.zeros_like(audio[0])
+                
+                # Save stems to final locations
                 base_name = audio_path.stem
                 output_paths = {}
                 
-                # Apply post-processing to drums
-                use_wiener = CONFIG.get('use_wiener_filtering', True)
-                use_gating = CONFIG.get('use_spectral_gating', True)
-                artifact_threshold = CONFIG.get('artifact_threshold_db', -40)
+                # Save vocals
+                vocals_path = Path(CONFIG['output_dir']) / 'separated' / 'vocals' / f"{base_name}_vocals.wav"
+                sf.write(vocals_path, stems['vocals'], sr)
+                output_paths['vocals_path'] = vocals_path
                 
-                # Get original audio for Wiener filtering
-                original_audio = batch_audio[idx][:, :original_length] if batch_audio[idx].ndim > 1 else batch_audio[idx][:original_length]
+                # Save violin
+                violin_path = Path(CONFIG['output_dir']) / 'separated' / 'violin' / f"{base_name}_violin.wav"
+                sf.write(violin_path, stems['violin'], sr)
+                output_paths['violin_path'] = violin_path
                 
-                if use_wiener:
-                    drums_combined = apply_wiener_filtering(drums_combined, original_audio, sr)
-                if use_gating:
-                    drums_combined = apply_spectral_gating(drums_combined, sr, artifact_threshold)
+                # Save ghatam
+                ghatam_path = Path(CONFIG['output_dir']) / 'separated' / 'ghatam' / f"{base_name}_ghatam.wav"
+                sf.write(ghatam_path, stems['ghatam'], sr)
+                output_paths['ghatam_path'] = ghatam_path
                 
-                # Save combined drums
-                drums_path = Path(CONFIG['output_dir']) / 'separated' / 'drums' / f"{base_name}_drums.wav"
-                drums_mono = drums_combined.mean(axis=0) if drums_combined.ndim > 1 else drums_combined
-                # Normalize to prevent clipping
-                max_val = np.max(np.abs(drums_mono))
-                if max_val > 0.95:
-                    drums_mono = drums_mono * (0.95 / max_val)
-                sf.write(drums_path, drums_mono, sr)
-                output_paths['drums_path'] = drums_path
+                # Save mridangam
+                mridangam_path = Path(CONFIG['output_dir']) / 'separated' / 'mridangam' / f"{base_name}_mridangam.wav"
+                sf.write(mridangam_path, stems['mridangam'], sr)
+                output_paths['mridangam_path'] = mridangam_path
                 
-                # Apply post-processing to accompaniment
-                if use_wiener:
-                    accompaniment = apply_wiener_filtering(accompaniment, original_audio, sr)
-                if use_gating:
-                    accompaniment = apply_spectral_gating(accompaniment, sr, artifact_threshold)
+                # Save drone
+                drone_path = Path(CONFIG['output_dir']) / 'separated' / 'drone' / f"{base_name}_drone.wav"
+                sf.write(drone_path, stems['drone'], sr)
+                output_paths['drone_path'] = drone_path
                 
-                # Save cleaned accompaniment
-                accompaniment_path = Path(CONFIG['output_dir']) / 'separated' / 'accompaniment' / f"{base_name}_accompaniment.wav"
-                accompaniment_mono = accompaniment.mean(axis=0) if accompaniment.ndim > 1 else accompaniment
-                # Normalize to prevent clipping
-                max_val = np.max(np.abs(accompaniment_mono))
-                if max_val > 0.95:
-                    accompaniment_mono = accompaniment_mono * (0.95 / max_val)
-                sf.write(accompaniment_path, accompaniment_mono, sr)
-                output_paths['accompaniment_path'] = accompaniment_path
+                # Combine percussion (ghatam + mridangam)
+                percussion = combine_percussion_stems(stems['ghatam'], stems['mridangam'], sr)
+                percussion_path = Path(CONFIG['output_dir']) / 'separated' / 'mridangam' / f"{base_name}_percussion.wav"
+                sf.write(percussion_path, percussion, sr)
+                output_paths['percussion_path'] = percussion_path
                 
-                if has_vocals:
-                    vocals_path = Path(CONFIG['output_dir']) / 'separated' / 'vocals' / f"{base_name}_vocals.wav"
-                    # Use Demucs vocals (they're usually better for vocals)
-                    vocals_mono = stems_demucs['vocals'].mean(axis=0) if stems_demucs['vocals'].ndim > 1 else stems_demucs['vocals']
-                    sf.write(vocals_path, vocals_mono, sr)
-                    output_paths['vocals_path'] = vocals_path
-                    output_paths['vocal_instrumental'] = 'vocal'
-                else:
-                    output_paths['vocals_path'] = None
-                    output_paths['vocal_instrumental'] = 'instrumental'
+                # Detect vocals presence
+                vocal_energy = np.sum(stems['vocals'] ** 2)
+                other_energy = np.sum((stems['violin'] + stems['drone']) ** 2)
+                has_vocals = vocal_energy > 0.1 * other_energy if other_energy > 0 else False
+                output_paths['vocal_instrumental'] = 'vocal' if has_vocals else 'instrumental'
                 
                 results.append(output_paths)
+                
+                # Clean up temporary files
+                if temp_audio_path.exists():
+                    temp_audio_path.unlink()
+                if separated_dir.exists():
+                    import shutil
+                    shutil.rmtree(separated_dir)
+                
+            except Exception as e:
+                logger.error(f"Error separating {audio_path}: {e}")
+                # Return empty result for this file
+                results.append({
+                    'vocals_path': None,
+                    'violin_path': None,
+                    'ghatam_path': None,
+                    'mridangam_path': None,
+                    'drone_path': None,
+                    'percussion_path': None,
+                    'vocal_instrumental': 'unknown'
+                })
         
         return results
         
     except ImportError as e:
-        logger.error(f"Demucs not properly installed: {e}")
-        logger.error("Please install demucs: pip install demucs")
+        logger.error(f"Spleeter not properly installed: {e}")
+        logger.error("Please install spleeter and ensure the trained model exists")
         return [{
-            'drums_path': None,
-            'accompaniment_path': None,
             'vocals_path': None,
+            'violin_path': None,
+            'ghatam_path': None,
+            'mridangam_path': None,
+            'drone_path': None,
+            'percussion_path': None,
             'vocal_instrumental': 'unknown'
         } for _ in audio_paths]
     except Exception as e:
         logger.error(f"Error in batch source separation: {e}")
         return [{
-            'drums_path': None,
-            'accompaniment_path': None,
             'vocals_path': None,
+            'violin_path': None,
+            'ghatam_path': None,
+            'mridangam_path': None,
+            'drone_path': None,
+            'percussion_path': None,
             'vocal_instrumental': 'unknown'
         } for _ in audio_paths]
 
 
 def separate_sources(audio_path: Path) -> Dict[str, Optional[Path]]:
     """
-    Perform ensemble source separation using Demucs + MDX-Net with two-pass refinement.
+    Perform source separation using fine-tuned Spleeter 5-stem model.
     
-    Process:
-    1. Ensemble separation: Run both Demucs (HTDemucs) and MDX-Net models
-    2. Fusion: Combine drums using TF-domain fusion (max or weighted transient)
-    3. Two-pass refinement: Re-separate accompaniment to extract missed drums
-    4. Final combination: Merge all drum sources
-    
-    Always extracts:
-    - Drums/Mridangam (percussion) - enhanced with ensemble + two-pass approach
-    - Violin/Accompaniment (other instruments) - cleaned of drums
-    - Vocals (if present) - from Demucs (better for vocals)
+    Separates audio into 5 stems:
+    - vocals
+    - violin
+    - ghatam (percussion)
+    - mridangam (percussion)
+    - drone
     
     Args:
         audio_path: Path to processed audio file
@@ -1495,249 +1507,17 @@ def separate_sources(audio_path: Path) -> Dict[str, Optional[Path]]:
     Returns:
         Dictionary with paths to separated stems
     """
-    try:
-        import torch
-        from demucs.apply import apply_model
-        
-        if torch.cuda.is_available():
-            device = 'cuda'
-            logger.debug(f"Using GPU: {torch.cuda.get_device_name(0)}")
-        else:
-            device = 'cpu'
-            logger.debug("CUDA not available, using CPU")
-        
-        # Load the audio
-        audio, sr = librosa.load(audio_path, sr=44100, mono=False)
-        
-        # Ensure stereo for demucs (duplicate mono to stereo if needed)
-        if audio.ndim == 1:
-            audio = np.stack([audio, audio])
-        
-        # Get cached models
-        demucs_model = get_demucs_model(device)
-        use_ensemble = CONFIG.get('use_model_ensemble', True)
-        mdx_model = None
-        if use_ensemble:
-            mdx_model_name = CONFIG.get('mdx_model', 'mdx_extra')
-            mdx_model = get_mdx_model(mdx_model_name, device)
-            if mdx_model is None:
-                logger.warning("MDX model not available, falling back to Demucs only")
-                use_ensemble = False
-        
-        # Convert to torch tensor
-        audio_tensor = torch.from_numpy(audio).float().unsqueeze(0)
-        if device == 'cuda':
-            audio_tensor = audio_tensor.to(device)
-        
-        # Get separation parameters from config
-        shifts = CONFIG.get('separation_shifts', 5)
-        overlap = CONFIG.get('separation_overlap', 0.25)
-        
-        # ========== FIRST PASS: Initial separation with Demucs ==========
-        with torch.no_grad():
-            sources_demucs = apply_model(demucs_model, audio_tensor, device=device, shifts=shifts, split=True, overlap=overlap)[0]
-        
-        # Sources order: drums, bass, other, vocals
-        stems_demucs = {
-            'drums': sources_demucs[0].cpu().numpy(),
-            'bass': sources_demucs[1].cpu().numpy(),
-            'other': sources_demucs[2].cpu().numpy(),
-            'vocals': sources_demucs[3].cpu().numpy(),
-        }
-        
-        # Apply MDX model if ensemble is enabled
-        drums_mdx = None
-        if use_ensemble and mdx_model is not None:
-            with torch.no_grad():
-                sources_mdx = apply_model(mdx_model, audio_tensor, device=device, shifts=shifts, split=True, overlap=overlap)[0]
-                drums_mdx = sources_mdx[0].cpu().numpy()
-                logger.debug(f"Applied MDX model for ensemble separation")
-        
-        # Clear GPU cache after first pass
-        if device == 'cuda':
-            torch.cuda.empty_cache()
-        
-        # Start with original accompaniment
-        accompaniment = stems_demucs['bass'] + stems_demucs['other']
-        
-        # ========== FUSE DRUMS FROM MULTIPLE MODELS ==========
-        drums_combined = stems_demucs['drums'].copy()
-        
-        # First: Combine with MDX if ensemble is enabled
-        if drums_mdx is not None:
-            fusion_method = CONFIG.get('fusion_method', 'weighted_transient')
-            mdx_weight = CONFIG.get('mdx_weight', 0.4)
-            use_freq_dep = CONFIG.get('freq_dependent_fusion', True)
-            
-            if use_freq_dep and fusion_method != 'max_tf':
-                # Use frequency-dependent fusion for better quality
-                drums_combined = apply_frequency_dependent_fusion(
-                    stems_demucs['drums'], drums_mdx, sr, mdx_weight
-                )
-                logger.debug(f"Fused drums using frequency-dependent fusion")
-            elif fusion_method == 'max_tf':
-                drums_combined = fuse_drums_tf_max(stems_demucs['drums'], drums_mdx, sr)
-            elif fusion_method == 'weighted_transient':
-                drums_combined = fuse_drums_weighted_transient(
-                    stems_demucs['drums'], drums_mdx, sr, mdx_weight
-                )
-            else:  # 'average'
-                drums_combined = fuse_drums_average(
-                    stems_demucs['drums'], drums_mdx, sr, mdx_weight
-                )
-            logger.debug(f"Fused drums from Demucs and MDX using {fusion_method}")
-            
-            # Remove fused drums from accompaniment to get cleaner accompaniment
-            # Convert drums_combined to same shape as accompaniment if needed
-            if drums_combined.ndim == 1 and accompaniment.ndim > 1:
-                drums_combined_stereo = np.stack([drums_combined, drums_combined])
-            elif drums_combined.ndim > 1 and accompaniment.ndim == 1:
-                drums_combined_stereo = drums_combined.mean(axis=0)
-            else:
-                drums_combined_stereo = drums_combined
-            
-            # Ensure same length
-            min_len = min(accompaniment.shape[-1], drums_combined_stereo.shape[-1])
-            accompaniment = accompaniment[..., :min_len]
-            drums_combined_stereo = drums_combined_stereo[..., :min_len]
-            
-            # Subtract fused drums from accompaniment
-            accompaniment = accompaniment - 0.5 * drums_combined_stereo  # Use 0.5 weight to avoid over-subtraction
-            # Ensure non-negative (prevent phase issues)
-            accompaniment = np.maximum(accompaniment, -np.abs(accompaniment) * 0.3)
-            logger.debug(f"Removed fused drums from accompaniment")
-        
-        # ========== SECOND PASS: Re-separate accompaniment ==========
-        drums_pass2 = None
-        use_two_pass = CONFIG.get('two_pass_separation', True)
-        weight_pass1 = CONFIG.get('drum_combination_weight', 0.7)
-        weight_pass2 = 1.0 - weight_pass1
-        
-        if use_two_pass:
-            # Check if accompaniment has significant energy
-            accompaniment_energy = np.sum(accompaniment ** 2)
-            if accompaniment_energy > 1e-6:
-                # Prepare accompaniment for second pass (use Demucs model)
-                acc_tensor = torch.from_numpy(accompaniment).float().unsqueeze(0)
-                if device == 'cuda':
-                    acc_tensor = acc_tensor.to(device)
-                
-                # Apply model to accompaniment (second pass)
-                with torch.no_grad():
-                    sources_pass2 = apply_model(
-                        demucs_model, 
-                        acc_tensor, 
-                        device=device, 
-                        shifts=shifts, 
-                        split=True, 
-                        overlap=overlap
-                    )[0]
-                
-                # Extract drums from second pass
-                drums_pass2 = sources_pass2[0].cpu().numpy()
-                logger.debug(f"Two-pass separation: extracted additional drums from accompaniment for {audio_path.stem}")
-        
-        # Combine with second pass drums
-        if drums_pass2 is not None:
-            drums_combined = weight_pass1 * drums_combined + weight_pass2 * drums_pass2
-            
-            # Further clean accompaniment by removing second pass drums
-            if drums_pass2.ndim == 1 and accompaniment.ndim > 1:
-                drums_pass2_stereo = np.stack([drums_pass2, drums_pass2])
-            elif drums_pass2.ndim > 1 and accompaniment.ndim == 1:
-                drums_pass2_stereo = drums_pass2.mean(axis=0)
-            else:
-                drums_pass2_stereo = drums_pass2
-            
-            # Ensure same length
-            min_len = min(accompaniment.shape[-1], drums_pass2_stereo.shape[-1])
-            accompaniment = accompaniment[..., :min_len]
-            drums_pass2_stereo = drums_pass2_stereo[..., :min_len]
-            
-            # Subtract second pass drums from accompaniment
-            accompaniment = accompaniment - weight_pass2 * drums_pass2_stereo
-            # Ensure non-negative (prevent phase issues)
-            accompaniment = np.maximum(accompaniment, -np.abs(accompaniment) * 0.3)
-            logger.debug(f"Removed second pass drums from accompaniment")
-        
-        # Detect if vocals are present (use Demucs vocals)
-        has_vocals = detect_vocals(
-            stems_demucs['vocals'].mean(axis=0) if stems_demucs['vocals'].ndim > 1 else stems_demucs['vocals'],
-            accompaniment.mean(axis=0) if accompaniment.ndim > 1 else accompaniment
-        )
-        
-        # Save stems
-        base_name = audio_path.stem
-        output_paths = {}
-        
-        # Apply post-processing to drums
-        use_wiener = CONFIG.get('use_wiener_filtering', True)
-        use_gating = CONFIG.get('use_spectral_gating', True)
-        artifact_threshold = CONFIG.get('artifact_threshold_db', -40)
-        
-        if use_wiener:
-            drums_combined = apply_wiener_filtering(drums_combined, audio, sr)
-        if use_gating:
-            drums_combined = apply_spectral_gating(drums_combined, sr, artifact_threshold)
-        
-        # Save combined drums
-        drums_path = Path(CONFIG['output_dir']) / 'separated' / 'drums' / f"{base_name}_drums.wav"
-        drums_mono = drums_combined.mean(axis=0) if drums_combined.ndim > 1 else drums_combined
-        # Normalize to prevent clipping
-        max_val = np.max(np.abs(drums_mono))
-        if max_val > 0.95:
-            drums_mono = drums_mono * (0.95 / max_val)
-        sf.write(drums_path, drums_mono, sr)
-        output_paths['drums_path'] = drums_path
-        
-        # Apply post-processing to accompaniment
-        if use_wiener:
-            accompaniment = apply_wiener_filtering(accompaniment, audio, sr)
-        if use_gating:
-            accompaniment = apply_spectral_gating(accompaniment, sr, artifact_threshold)
-        
-        # Save cleaned accompaniment
-        accompaniment_path = Path(CONFIG['output_dir']) / 'separated' / 'accompaniment' / f"{base_name}_accompaniment.wav"
-        accompaniment_mono = accompaniment.mean(axis=0) if accompaniment.ndim > 1 else accompaniment
-        # Normalize to prevent clipping
-        max_val = np.max(np.abs(accompaniment_mono))
-        if max_val > 0.95:
-            accompaniment_mono = accompaniment_mono * (0.95 / max_val)
-        sf.write(accompaniment_path, accompaniment_mono, sr)
-        output_paths['accompaniment_path'] = accompaniment_path
-        
-        if has_vocals:
-            # Save vocals (use Demucs vocals - they're usually better)
-            vocals_path = Path(CONFIG['output_dir']) / 'separated' / 'vocals' / f"{base_name}_vocals.wav"
-            vocals_mono = stems_demucs['vocals'].mean(axis=0) if stems_demucs['vocals'].ndim > 1 else stems_demucs['vocals']
-            sf.write(vocals_path, vocals_mono, sr)
-            output_paths['vocals_path'] = vocals_path
-            output_paths['vocal_instrumental'] = 'vocal'
-        else:
-            output_paths['vocals_path'] = None
-            output_paths['vocal_instrumental'] = 'instrumental'
-        
-        return output_paths
-        
-    except ImportError as e:
-        logger.error(f"Demucs not properly installed: {e}")
-        logger.error("Please install demucs: pip install demucs")
-        return {
-            'percussion': None,
-            'other_path': None,
-            'vocals_path': None,
-            'instrumental_path': None,
-            'vocal_instrumental': 'unknown'
-        }
-    except Exception as e:
-        logger.error(f"Error in source separation for {audio_path}: {e}")
-        return {
-            'percussion': None,
-            'other_path': None,
-            'vocals_path': None,
-            'instrumental_path': None,
-            'vocal_instrumental': 'unknown'
-        }
+    # Use batch separation function for consistency
+    results = separate_sources_batch([audio_path])
+    return results[0] if results else {
+        'vocals_path': None,
+        'violin_path': None,
+        'ghatam_path': None,
+        'mridangam_path': None,
+        'drone_path': None,
+        'percussion_path': None,
+        'vocal_instrumental': 'unknown'
+    }
 
 
 def process_single_file_wrapper(args: Tuple[Path, Dict]) -> Tuple[List[Dict], str]:
@@ -1901,9 +1681,12 @@ def process_all_files(data_dir: str, resume: bool = False) -> pd.DataFrame:
         'raga',
         'thaat',
         'dataset_source',
-        'drums_path',
-        'accompaniment_path',
         'vocals_path',
+        'violin_path',
+        'ghatam_path',
+        'mridangam_path',
+        'drone_path',
+        'percussion_path',
         'vocal_instrumental',
         'spectral_energy',
         'processing_timestamp',
