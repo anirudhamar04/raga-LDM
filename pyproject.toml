@@ -13,6 +13,7 @@ dependencies = [
     "tensorflow==2.12.1",
     "tensorflow-io-gcs-filesystem==0.32.0",
     "spleeter",
+    "librosa>=0.11.0",
 ]
 
 
