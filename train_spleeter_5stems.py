@@ -28,6 +28,8 @@ from functools import partial
 from typing import Optional
 
 import tensorflow as tf
+import wandb
+from tensorflow.core.framework.summary_pb2 import Summary as TFSummary
 
 # Add spleeter to path
 sys.path.insert(0, str(Path(__file__).parent / "spleeter"))
@@ -151,84 +153,161 @@ def setup_model_directory(
     params: dict,
     pretrained_model: Optional[str],
     resume: bool
-) -> str:
+) -> tuple:
     """
     Set up the model directory for training.
-    
+
     Args:
         params: Configuration dictionary
         pretrained_model: Name of pretrained model to load (if any)
         resume: Whether to resume from existing checkpoint
-        
+
     Returns:
-        Path to model directory
+        Tuple of (model_dir, warm_start_ckpt_path or None)
     """
     model_dir = params["model_dir"]
-    
+    warm_start_ckpt = None
+
     # Create model directory
     os.makedirs(model_dir, exist_ok=True)
-    
+
     # Save configuration
     config_path = os.path.join(model_dir, "params.json")
     with open(config_path, 'w') as f:
         json.dump(params, f, indent=2)
     logger.info(f"Saved configuration to: {config_path}")
-    
+
     # Initialize from pretrained model if requested
     if pretrained_model and not resume:
         logger.info(f"Initializing from pretrained model: {pretrained_model}")
-        
-        # Check if checkpoint already exists
-        checkpoint_path = tf.train.latest_checkpoint(model_dir)
-        if checkpoint_path:
-            logger.warning(
-                f"Model directory already contains checkpoint: {checkpoint_path}"
+
+        # Check if a training checkpoint already exists in model_dir
+        existing_ckpt = tf.train.latest_checkpoint(model_dir)
+        if existing_ckpt:
+            logger.info(
+                f"Model directory already contains checkpoint: {existing_ckpt}. "
+                "Skipping pretrained init — delete the checkpoint to restart from pretrained."
             )
-            response = input("Overwrite existing checkpoint? (y/n): ").strip().lower()
-            if response != 'y':
-                logger.info("Using existing checkpoint")
-                return model_dir
-        
-        # Initialize from pretrained
-        try:
-            from utils.init_pretrained_weights import initialize_from_pretrained
-            
-            temp_config = config_path
-            initialized_dir = initialize_from_pretrained(
-                pretrained_model,
-                temp_config,
-                model_dir
+            return model_dir, None
+
+        # Save pretrained init to a subdirectory so the Estimator doesn't treat
+        # it as a full training checkpoint (which would require Adam state).
+        init_dir = os.path.join(model_dir, "pretrained_init")
+        existing_init_ckpt = tf.train.latest_checkpoint(init_dir)
+        if existing_init_ckpt:
+            warm_start_ckpt = existing_init_ckpt
+            logger.info(
+                f"Found existing pretrained init checkpoint: {warm_start_ckpt}. "
+                "Skipping re-download."
             )
-            logger.info(f"Initialized model from {pretrained_model}")
-        except Exception as e:
-            logger.warning(f"Failed to initialize from pretrained model: {e}")
-            logger.warning("Training will start with random initialization")
-    
+        else:
+            try:
+                from utils.init_pretrained_weights import initialize_from_pretrained
+
+                initialize_from_pretrained(pretrained_model, config_path, init_dir)
+                warm_start_ckpt = tf.train.latest_checkpoint(init_dir)
+                logger.info(
+                    f"Pretrained weights mapped to: {warm_start_ckpt}. "
+                    "Will warm-start Estimator from these weights."
+                )
+            except Exception as e:
+                logger.warning(f"Failed to initialize from pretrained model: {e}")
+                logger.warning("Training will start with random initialization")
+
     elif resume:
-        checkpoint_path = tf.train.latest_checkpoint(model_dir)
-        if checkpoint_path:
-            logger.info(f"Resuming training from checkpoint: {checkpoint_path}")
+        existing_ckpt = tf.train.latest_checkpoint(model_dir)
+        if existing_ckpt:
+            logger.info(f"Resuming training from checkpoint: {existing_ckpt}")
         else:
             logger.warning(f"No checkpoint found in {model_dir}, starting from scratch")
-    
-    return model_dir
+
+    return model_dir, warm_start_ckpt
+
+
+def _log_tf_summary(raw_summary: bytes, step: int) -> None:
+    """Parse a serialised TF Summary proto and forward scalar values to wandb."""
+    summary = TFSummary()
+    summary.ParseFromString(raw_summary)
+    metrics = {
+        v.tag: v.simple_value
+        for v in summary.value
+        if v.HasField("simple_value")
+    }
+    if metrics:
+        wandb.log(metrics, step=step)
+
+
+class WandbTrainHook(tf.estimator.SessionRunHook):
+    """Logs training loss / summaries to W&B every N steps."""
+
+    def __init__(self, log_every_n_steps: int = 50):
+        self._log_every_n_steps = log_every_n_steps
+        self._summary_op = None
+
+    def begin(self):
+        self._summary_op = tf.compat.v1.summary.merge_all()
+        self._global_step = tf.compat.v1.train.get_global_step()
+
+    def before_run(self, run_context):
+        fetches = {"global_step": self._global_step}
+        if self._summary_op is not None:
+            fetches["summary"] = self._summary_op
+        return tf.estimator.SessionRunArgs(fetches)
+
+    def after_run(self, run_context, run_values):
+        results = run_values.results
+        step = int(results.get("global_step") or 0)
+        if step % self._log_every_n_steps != 0:
+            return
+        raw = results.get("summary")
+        if raw is not None:
+            _log_tf_summary(raw, step)
+
+
+class WandbEvalHook(tf.estimator.SessionRunHook):
+    """Logs eval metrics (per-instrument losses + absolute_difference) to W&B."""
+
+    def begin(self):
+        self._summary_op = tf.compat.v1.summary.merge_all()
+        self._global_step = tf.compat.v1.train.get_global_step()
+
+    def end(self, session):
+        try:
+            ops = [self._global_step]
+            if self._summary_op is not None:
+                ops.append(self._summary_op)
+            results = session.run(ops)
+            step = int(results[0] or 0)
+            if len(results) > 1 and results[1] is not None:
+                _log_tf_summary(results[1], step)
+        except Exception as e:
+            logger.warning(f"Could not log eval metrics to W&B: {e}")
 
 
 def train(
     params: dict,
     data_dir: str,
     adapter: str,
-    gpu_memory_fraction: float = 0.9
+    gpu_memory_fraction: float = 0.9,
+    warm_start_from: Optional[str] = None,
 ) -> None:
     """
     Train the Spleeter model.
-    
+
     Args:
         params: Configuration dictionary
         data_dir: Base directory containing audio files
         adapter: Audio adapter name
         gpu_memory_fraction: Fraction of GPU memory to use
+        warm_start_from: Path to a weights-only checkpoint to warm-start from
     """
+    wandb.init(
+        entity="RetinalDistill",
+        project="CarnaticSpeeter",
+        config=params,
+        resume="allow",
+    )
+
     # Get audio adapter
     audio_adapter = AudioAdapter.get(adapter)
     
@@ -239,6 +318,20 @@ def train(
     
     # Create estimator
     logger.info("Creating TensorFlow estimator...")
+    warm_start_settings = None
+    if warm_start_from is not None:
+        logger.info(f"Warm-starting model weights from: {warm_start_from}")
+        # Only warm-start variables that exist in the checkpoint. The 5-stem model
+        # has more layers than the 4-stem pretrained checkpoint (the 5th stem's
+        # variables don't exist in it), so we filter to the intersection.
+        reader = tf.train.load_checkpoint(warm_start_from)
+        ckpt_var_names = set(reader.get_variable_to_shape_map().keys())
+        logger.info(f"Checkpoint contains {len(ckpt_var_names)} variables")
+
+        warm_start_settings = tf.estimator.WarmStartSettings(
+            ckpt_to_initialize_from=warm_start_from,
+            vars_to_warm_start=list(ckpt_var_names),
+        )
     estimator = tf.estimator.Estimator(
         model_fn=model_fn,
         model_dir=params["model_dir"],
@@ -251,6 +344,7 @@ def train(
             log_step_count_steps=50,
             keep_checkpoint_max=5,
         ),
+        warm_start_from=warm_start_settings,
     )
     
     # Create training input function
@@ -274,13 +368,15 @@ def train(
     # Create train and eval specs
     train_spec = tf.estimator.TrainSpec(
         input_fn=train_input_fn,
-        max_steps=params.get("train_max_steps", 2000000)
+        max_steps=params.get("train_max_steps", 2000000),
+        hooks=[WandbTrainHook(log_every_n_steps=params.get("save_summary_steps", 10))],
     )
-    
+
     eval_spec = tf.estimator.EvalSpec(
         input_fn=eval_input_fn,
         steps=None,
-        throttle_secs=params.get("throttle_secs", 600)
+        throttle_secs=params.get("throttle_secs", 600),
+        hooks=[WandbEvalHook()],
     )
     
     # Train the model
@@ -296,17 +392,19 @@ def train(
     try:
         tf.estimator.train_and_evaluate(estimator, train_spec, eval_spec)
         logger.info("Training completed successfully!")
-        
+
         # Write model probe
         ModelProvider.writeProbe(params["model_dir"])
         logger.info(f"Model probe written to {params['model_dir']}")
-        
+
     except KeyboardInterrupt:
         logger.info("\nTraining interrupted by user")
         logger.info(f"Checkpoint saved in: {params['model_dir']}")
     except Exception as e:
         logger.error(f"Training failed with error: {e}")
         raise
+    finally:
+        wandb.finish()
 
 
 def main():
@@ -316,6 +414,9 @@ def main():
     # Set logging level
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
+        # Keep noisy network/HTTP libraries at WARNING to avoid frame-level dumps
+        for noisy in ("httpx", "httpcore", "hpack", "h2"):
+            logging.getLogger(noisy).setLevel(logging.WARNING)
     
     # Load configuration
     logger.info(f"Loading configuration from: {args.config}")
@@ -409,19 +510,20 @@ def main():
     
     # Set up model directory
     logger.info("\nSetting up model directory...")
-    model_dir = setup_model_directory(
+    model_dir, warm_start_ckpt = setup_model_directory(
         params,
         args.pretrained_model,
         args.resume
     )
     params["model_dir"] = model_dir
-    
+
     # Train the model
     train(
         params,
         args.data,
         args.adapter,
-        args.gpu_memory_fraction
+        args.gpu_memory_fraction,
+        warm_start_from=warm_start_ckpt,
     )
     
     logger.info("\n" + "=" * 80)

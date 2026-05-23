@@ -1,0 +1,16 @@
+{"time":"2026-05-23T16:20:13.940690646Z","level":"INFO","msg":"stream: starting","core version":"0.19.11","symlink path":"/content/raga-LDM/wandb/offline-run-20260523_162013-g1dgeppv/logs/debug-core.log"}
+{"time":"2026-05-23T16:20:14.042910952Z","level":"WARN","msg":"GraphQL client is nil, skipping feature loading"}
+{"time":"2026-05-23T16:20:14.043027113Z","level":"INFO","msg":"created new stream","id":"g1dgeppv"}
+{"time":"2026-05-23T16:20:14.043052342Z","level":"INFO","msg":"stream: started","id":"g1dgeppv"}
+{"time":"2026-05-23T16:20:14.043098919Z","level":"INFO","msg":"writer: Do: started","stream_id":"g1dgeppv"}
+{"time":"2026-05-23T16:20:14.043127757Z","level":"INFO","msg":"handler: started","stream_id":"g1dgeppv"}
+{"time":"2026-05-23T16:20:14.043099098Z","level":"INFO","msg":"sender: started","stream_id":"g1dgeppv"}
+{"time":"2026-05-23T16:20:14.04698467Z","level":"INFO","msg":"Starting system monitor"}
+{"time":"2026-05-23T16:20:29.25419735Z","level":"INFO","msg":"Stopping system monitor"}
+{"time":"2026-05-23T16:20:29.254292194Z","level":"INFO","msg":"Stopped system monitor"}
+{"time":"2026-05-23T16:20:29.254991626Z","level":"INFO","msg":"handler: operation stats","stats":{}}
+{"time":"2026-05-23T16:20:29.257231544Z","level":"INFO","msg":"stream: closing","id":"g1dgeppv"}
+{"time":"2026-05-23T16:20:29.257252428Z","level":"INFO","msg":"handler: closed","stream_id":"g1dgeppv"}
+{"time":"2026-05-23T16:20:29.257262108Z","level":"INFO","msg":"writer: Close: closed","stream_id":"g1dgeppv"}
+{"time":"2026-05-23T16:20:29.257303975Z","level":"INFO","msg":"sender: closed","stream_id":"g1dgeppv"}
+{"time":"2026-05-23T16:20:29.257365751Z","level":"INFO","msg":"stream: closed","id":"g1dgeppv"}

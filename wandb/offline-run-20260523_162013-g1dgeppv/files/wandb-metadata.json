@@ -1,0 +1,50 @@
+{
+  "os": "Linux-6.6.122+-x86_64-with-glibc2.35",
+  "python": "CPython 3.11.15",
+  "startedAt": "2026-05-23T16:20:13.936510Z",
+  "args": [
+    "--config",
+    "spleeter/configs/5stems_carnatic/sanidha_config.json",
+    "--data",
+    "/content",
+    "--pretrained_model",
+    "spleeter:4stems",
+    "--verbose"
+  ],
+  "program": "/content/raga-LDM/train_spleeter_5stems.py",
+  "codePath": "train_spleeter_5stems.py",
+  "git": {
+    "remote": "https://github.com/anirudhamar04/raga-LDM.git",
+    "commit": "3392008fa755a6e3fbb05d2db500cd2264c88b0f"
+  },
+  "root": "/content/raga-LDM",
+  "host": "2ec27995a365",
+  "executable": "/content/raga-LDM/.venv/bin/python3",
+  "codePathLocal": "train_spleeter_5stems.py",
+  "cpu_count": 6,
+  "cpu_count_logical": 12,
+  "gpu": "NVIDIA A100-SXM4-40GB",
+  "gpu_count": 1,
+  "disk": {
+    "/": {
+      "total": "253055008768",
+      "used": "61301899264"
+    }
+  },
+  "memory": {
+    "total": "89629196288"
+  },
+  "cpu": {
+    "count": 6,
+    "countLogical": 12
+  },
+  "gpu_nvidia": [
+    {
+      "name": "NVIDIA A100-SXM4-40GB",
+      "memoryTotal": "42949672960",
+      "cudaCores": 6912,
+      "architecture": "Ampere"
+    }
+  ],
+  "cudaVersion": "13.0"
+}

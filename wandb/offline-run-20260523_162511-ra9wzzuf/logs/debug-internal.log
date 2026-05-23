@@ -1,0 +1,16 @@
+{"time":"2026-05-23T16:25:11.924838407Z","level":"INFO","msg":"stream: starting","core version":"0.19.11","symlink path":"/content/raga-LDM/wandb/offline-run-20260523_162511-ra9wzzuf/logs/debug-core.log"}
+{"time":"2026-05-23T16:25:12.026824513Z","level":"WARN","msg":"GraphQL client is nil, skipping feature loading"}
+{"time":"2026-05-23T16:25:12.026939035Z","level":"INFO","msg":"created new stream","id":"ra9wzzuf"}
+{"time":"2026-05-23T16:25:12.026979302Z","level":"INFO","msg":"stream: started","id":"ra9wzzuf"}
+{"time":"2026-05-23T16:25:12.026995624Z","level":"INFO","msg":"handler: started","stream_id":"ra9wzzuf"}
+{"time":"2026-05-23T16:25:12.027041601Z","level":"INFO","msg":"sender: started","stream_id":"ra9wzzuf"}
+{"time":"2026-05-23T16:25:12.02705652Z","level":"INFO","msg":"writer: Do: started","stream_id":"ra9wzzuf"}
+{"time":"2026-05-23T16:25:12.031211439Z","level":"INFO","msg":"Starting system monitor"}
+{"time":"2026-05-23T16:25:27.192040463Z","level":"INFO","msg":"Stopping system monitor"}
+{"time":"2026-05-23T16:25:27.192141471Z","level":"INFO","msg":"Stopped system monitor"}
+{"time":"2026-05-23T16:25:27.192863359Z","level":"INFO","msg":"handler: operation stats","stats":{}}
+{"time":"2026-05-23T16:25:27.194911917Z","level":"INFO","msg":"stream: closing","id":"ra9wzzuf"}
+{"time":"2026-05-23T16:25:27.194929023Z","level":"INFO","msg":"handler: closed","stream_id":"ra9wzzuf"}
+{"time":"2026-05-23T16:25:27.194936724Z","level":"INFO","msg":"writer: Close: closed","stream_id":"ra9wzzuf"}
+{"time":"2026-05-23T16:25:27.194957825Z","level":"INFO","msg":"sender: closed","stream_id":"ra9wzzuf"}
+{"time":"2026-05-23T16:25:27.194998652Z","level":"INFO","msg":"stream: closed","id":"ra9wzzuf"}
