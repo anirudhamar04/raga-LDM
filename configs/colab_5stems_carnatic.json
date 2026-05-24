@@ -1,0 +1,41 @@
+{
+    "train_csv": "/content/raga-LDM/example_dataset/train.csv",
+    "validation_csv": "/content/raga-LDM/example_dataset/validation.csv",
+    "model_dir": "/content/drive/MyDrive/Models/Spleeter",
+
+    "mix_name": "mix",
+    "instrument_list": ["vocals", "violin", "ghatam", "mridangam", "drone"],
+
+    "sample_rate": 44100,
+    "frame_length": 4096,
+    "frame_step": 1024,
+    "T": 512,
+    "F": 1024,
+    "n_channels": 2,
+    "separation_exponent": 2,
+    "mask_extension": "zeros",
+
+    "learning_rate": 5e-5,
+    "batch_size": 16,
+    "max_epochs": 200,
+    "n_chunks_per_song": 4,
+    "chunk_duration": 20.0,
+
+    "random_seed": 42,
+    "save_summary_steps": 25,
+
+    "augmentation": {
+        "stitch_prob": 0.4,
+        "gain_prob": 0.5,
+        "gain_db_max": 3.0,
+        "channel_swap_prob": 0.5
+    },
+
+    "model": {
+        "type": "unet.unet",
+        "params": {
+            "conv_activation": "ELU",
+            "deconv_activation": "ELU"
+        }
+    }
+}

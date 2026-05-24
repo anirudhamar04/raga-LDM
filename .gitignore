@@ -14,3 +14,4 @@ data/
 processed/
 trained_models/
 pretrained_models/
+smoke_test/

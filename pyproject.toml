@@ -1,22 +1,33 @@
 [project]
 name = "ragaldm"
 version = "0.1.0"
-description = "Add your description here"
+description = "Raga-LDM: 5-stem Carnatic source separator (PyTorch port of Spleeter)"
 readme = "README.md"
-requires-python = ">=3.11,<3.12"
+requires-python = ">=3.10,<3.13"
 dependencies = [
-    "ffmpeg-python>=0.2.0",
-    "httpx[http2]>=0.19.0",
-    "norbert>=0.2.1",
-    "numpy<2.0.0",
-    "pandas>=1.3.0",
+    "torch>=2.7",
+    "torchaudio>=2.7",
+    "soundfile>=0.12",
+    "librosa>=0.11",
+    "numpy>=1.26",
+    "pandas>=1.3",
+    "tqdm>=4.66",
+    "wandb>=0.19",
+    "ffmpeg-python>=0.2",
+    "httpx[http2]>=0.19",
+    "tensorflow>=2.15.0",
+]
+
+[project.optional-dependencies]
+# Only needed for the one-shot TF -> PyTorch weight conversion via convert_spleeter_weights.py.
+# Plain tensorflow is CPU-only on Windows since 2.11 (CUDA support is WSL-only), so no
+# tensorflow-cpu variant is needed. The converter only reads tensors from a checkpoint.
+# Install with: uv sync --extra convert
+convert = [
     "tensorflow==2.15.0",
-    "tensorflow-io-gcs-filesystem==0.35.0",
-    "nvidia-cudnn-cu12==8.9.7.29",
-    "spleeter",
-    "librosa>=0.11.0",
-    "wand>=0.7.1",
-    "wandb>=0.19.11",
+    # tensorflow==2.15 on Windows is just a stub that requires tensorflow-intel for the
+    # actual Python package. Listing it explicitly so uv resolves it on Windows.
+    "tensorflow-intel==2.15.0; sys_platform == 'win32'",
 ]
 
 
@@ -26,7 +37,22 @@ build-backend = "hatchling.build"
 
 
 [tool.hatch.build.targets.wheel]
-packages = ["ragaldm", "utils"]
+packages = ["ragaldm"]
+
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv]
+# tensorflow-io-gcs-filesystem dropped Windows wheels after 0.31.0. The only use
+# of TF in this repo is the one-shot weight converter, which doesn't need GCS
+# filesystem access, so pinning to 0.31.0 on Windows is safe.
+override-dependencies = [
+    "tensorflow-io-gcs-filesystem==0.31.0; sys_platform == 'win32'",
+]
 
 [tool.uv.sources]
-spleeter = { path = "spleeter", editable = true }
+torch = { index = "pytorch-cu128" }
+torchaudio = { index = "pytorch-cu128" }
