@@ -171,12 +171,38 @@ def run_validation(
     return metrics
 
 
+def _log_device_banner(device: torch.device, use_bf16: bool) -> None:
+    """Print a short banner so it's obvious whether training will use CUDA."""
+    logger.info("=" * 68)
+    if device.type == "cuda":
+        if not torch.cuda.is_available():
+            logger.warning("Requested --device cuda but torch.cuda.is_available() == False.")
+            logger.warning("Falling back to CPU is NOT automatic — training will OOM/crash.")
+        else:
+            idx = device.index if device.index is not None else torch.cuda.current_device()
+            props = torch.cuda.get_device_properties(idx)
+            total_gb = props.total_memory / (1024 ** 3)
+            bf16_native = torch.cuda.is_bf16_supported()
+            logger.info("Device: CUDA:%d  %s  (%.1f GB, sm_%d%d)",
+                        idx, props.name, total_gb, props.major, props.minor)
+            logger.info("CUDA toolkit: %s  cuDNN: %s",
+                        torch.version.cuda, torch.backends.cudnn.version())
+            logger.info("Precision: bf16 autocast=%s (HW native bf16=%s)",
+                        use_bf16, bf16_native)
+    else:
+        logger.info("Device: CPU (no CUDA). Training will be very slow.")
+        logger.info("torch.cuda.is_available()=%s", torch.cuda.is_available())
+    logger.info("torch=%s", torch.__version__)
+    logger.info("=" * 68)
+
+
 def main() -> int:
     args = parse_args()
     torch.manual_seed(args.seed)
 
     device = torch.device(args.device)
     use_bf16 = not args.no_bf16 and device.type == "cuda"
+    _log_device_banner(device, use_bf16)
 
     params = load_config(args.config, args.data)
     model_dir = Path(params["model_dir"])

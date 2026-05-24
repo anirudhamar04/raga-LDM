@@ -22,7 +22,7 @@
     "chunk_duration": 20.0,
 
     "random_seed": 42,
-    "save_summary_steps": 25,
+    "save_summary_steps": 10,
 
     "augmentation": {
         "stitch_prob": 0.4,
