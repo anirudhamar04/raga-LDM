@@ -61,6 +61,7 @@ class SpleeterDataset(Dataset):
         sample_rate: int = 44100,
         chunk_duration: float = 20.0,
         n_chunks_per_song: int = 2,
+        chunk_stride_sec: Optional[float] = None,
         frame_length: int = 4096,
         frame_step: int = 1024,
         T: int = 512,
@@ -70,6 +71,13 @@ class SpleeterDataset(Dataset):
         random_seed: int = 0,
         augmentation: Optional[Dict] = None,
     ) -> None:
+        """
+        If `chunk_stride_sec` is set, each song contributes
+            n_chunks = max(1, floor((duration - chunk_duration - 2*MARGIN) / stride) + 1)
+        chunks spaced `chunk_stride_sec` apart, overriding `n_chunks_per_song`.
+        Long songs contribute proportionally more samples; short songs as few as 1.
+        Val mode always uses a single central chunk regardless of these knobs.
+        """
         self.data_dir = data_dir
         self.instrument_list = list(instrument_list)
         self.mix_name = mix_name
@@ -81,15 +89,19 @@ class SpleeterDataset(Dataset):
         self.F = F
         self.n_channels = n_channels
         self.mode = mode
+        # Stride-based chunking is train-only; val always uses one central chunk.
         if mode == "val":
             self.n_chunks_per_song = 1
+            self.chunk_stride_sec = None
             self.chunk_duration = min(chunk_duration, 12.0)
         else:
             self.n_chunks_per_song = max(1, n_chunks_per_song)
+            self.chunk_stride_sec = (
+                float(chunk_stride_sec) if chunk_stride_sec and chunk_stride_sec > 0 else None
+            )
         self.random_seed = random_seed
         self._rng = np.random.default_rng(random_seed)
 
-        # Augmentation config (train mode only; val ignores it).
         aug = augmentation or {}
         if mode == "train":
             self.stitch_prob = float(aug.get("stitch_prob", 0.0))
@@ -105,7 +117,17 @@ class SpleeterDataset(Dataset):
         self.df = pd.read_csv(csv_path)
         self._validate_columns()
 
-        # Per-process STFT helper (CPU). Each worker gets its own copy via DataLoader fork/spawn.
+        # Precompute the flat (row_idx, chunk_idx) index. With stride-mode this is
+        # variable per row; in n_chunks mode it's a constant n_chunks_per_song.
+        self._index: List[Tuple[int, int]] = []
+        self._chunks_per_row: List[int] = []
+        for row_idx in range(len(self.df)):
+            duration = float(self.df.iloc[row_idx]["duration"])
+            n_here = self._compute_n_chunks(duration)
+            self._chunks_per_row.append(n_here)
+            for k in range(n_here):
+                self._index.append((row_idx, k))
+
         self.stft_proc = STFTProcessor(
             frame_length=frame_length,
             frame_step=frame_step,
@@ -121,14 +143,28 @@ class SpleeterDataset(Dataset):
         if missing:
             raise ValueError(f"CSV missing columns: {missing}")
 
-    def __len__(self) -> int:
-        return len(self.df) * self.n_chunks_per_song
+    def _compute_n_chunks(self, duration: float) -> int:
+        """How many chunks does a song of given duration contribute?"""
+        if self.chunk_stride_sec is None:
+            return self.n_chunks_per_song
+        available = duration - self.chunk_duration - 2 * self.MARGIN
+        if available <= 0:
+            return 1
+        return max(1, int(available // self.chunk_stride_sec) + 1)
 
-    def _segment_start(self, duration: float, k: int) -> float:
-        """Mirror of legacy DatasetBuilder.compute_segments."""
-        if self.n_chunks_per_song == 1:
+    def __len__(self) -> int:
+        return len(self._index)
+
+    def _segment_start(self, duration: float, k: int, n_chunks_here: int) -> float:
+        """Chunk-k start in seconds. Two branches:
+        - stride mode: start = k * chunk_stride_sec + MARGIN.
+        - legacy n_chunks_per_song mode: evenly-spaced offsets across the song.
+        """
+        if self.chunk_stride_sec is not None:
+            return max(k * self.chunk_stride_sec + self.MARGIN, 0.0)
+        if n_chunks_here == 1:
             return max(duration / 2.0 - self.chunk_duration / 2.0, 0.0)
-        denom = max(self.n_chunks_per_song - 1, 1)
+        denom = max(n_chunks_here - 1, 1)
         usable = duration - self.chunk_duration - 2 * self.MARGIN
         return max(k * usable / denom + self.MARGIN, 0.0)
 
@@ -186,17 +222,19 @@ class SpleeterDataset(Dataset):
         out[:, xf_end:] = wav_b[:, xf_end:]
         return out
 
-    def _build_plan(self, k_primary: int, n_samples: int) -> _AugmentationPlan:
+    def _build_plan(
+        self, k_primary: int, n_chunks_here: int, n_samples: int
+    ) -> _AugmentationPlan:
         """Sample augmentation decisions for this __getitem__ call."""
         secondary_k: Optional[int] = None
         splice_sample: Optional[int] = None
         if (
             self.mode == "train"
-            and self.n_chunks_per_song > 1
+            and n_chunks_here > 1
             and self.stitch_prob > 0.0
             and self._rng.random() < self.stitch_prob
         ):
-            choices = [k for k in range(self.n_chunks_per_song) if k != k_primary]
+            choices = [k for k in range(n_chunks_here) if k != k_primary]
             secondary_k = int(self._rng.choice(choices))
             # Keep the splice safely away from the boundaries so the crossfade fits.
             min_splice = self._CROSSFADE_SAMPLES + 1
@@ -233,15 +271,18 @@ class SpleeterDataset(Dataset):
         rel_path: str,
         duration: float,
         k_primary: int,
+        n_chunks_here: int,
         n_samples: int,
         plan: _AugmentationPlan,
     ) -> np.ndarray:
         primary = self._load_chunk(
-            rel_path, self._segment_start(duration, k_primary), n_samples
+            rel_path, self._segment_start(duration, k_primary, n_chunks_here), n_samples
         )
         if plan.secondary_k is not None and plan.splice_sample is not None:
             secondary = self._load_chunk(
-                rel_path, self._segment_start(duration, plan.secondary_k), n_samples
+                rel_path,
+                self._segment_start(duration, plan.secondary_k, n_chunks_here),
+                n_samples,
             )
             primary = self._splice(primary, secondary, plan.splice_sample)
         if plan.gain is not None:
@@ -272,21 +313,22 @@ class SpleeterDataset(Dataset):
         return mag[:, t_start : t_start + self.T, :], t_start
 
     def __getitem__(self, idx: int) -> Tuple[Tensor, Dict[str, Tensor]]:
-        row_idx, k = divmod(idx, self.n_chunks_per_song)
+        row_idx, k = self._index[idx]
         row = self.df.iloc[row_idx]
         duration = float(row["duration"])
+        n_chunks_here = self._chunks_per_row[row_idx]
         n_samples = int(self.chunk_duration * self.sample_rate)
-        plan = self._build_plan(k_primary=k, n_samples=n_samples)
+        plan = self._build_plan(k_primary=k, n_chunks_here=n_chunks_here, n_samples=n_samples)
 
         mix_wav = self._load_with_plan(
-            row[f"{self.mix_name}_path"], duration, k, n_samples, plan
+            row[f"{self.mix_name}_path"], duration, k, n_chunks_here, n_samples, plan
         )
         mix_spec, t_start = self._to_input_spec(mix_wav, t_start=None)
 
         stem_specs: Dict[str, Tensor] = {}
         for inst in self.instrument_list:
             wav = self._load_with_plan(
-                row[f"{inst}_path"], duration, k, n_samples, plan
+                row[f"{inst}_path"], duration, k, n_chunks_here, n_samples, plan
             )
             spec, _ = self._to_input_spec(wav, t_start=t_start)
             stem_specs[inst] = spec
@@ -319,6 +361,7 @@ def make_loaders(
             sample_rate=params["sample_rate"],
             chunk_duration=params.get("chunk_duration", 20.0),
             n_chunks_per_song=params.get("n_chunks_per_song", 2),
+            chunk_stride_sec=params.get("chunk_stride_sec"),
             frame_length=params["frame_length"],
             frame_step=params["frame_step"],
             T=params["T"],

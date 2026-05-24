@@ -19,6 +19,7 @@
     "batch_size": 64,
     "max_epochs": 50,
     "n_chunks_per_song": 4,
+    "chunk_stride_sec": 20.0,
     "chunk_duration": 30.0,
 
     "random_seed": 42,
