@@ -16,10 +16,10 @@
     "mask_extension": "zeros",
 
     "learning_rate": 5e-5,
-    "batch_size": 16,
-    "max_epochs": 200,
+    "batch_size": 64,
+    "max_epochs": 50,
     "n_chunks_per_song": 4,
-    "chunk_duration": 20.0,
+    "chunk_duration": 30.0,
 
     "random_seed": 42,
     "save_summary_steps": 10,

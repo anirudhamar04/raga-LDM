@@ -256,13 +256,20 @@ def main() -> int:
 
     wandb_run = None
     if not args.no_wandb:
-        wandb_run = wandb.init(
-            entity=os.environ.get("WANDB_ENTITY", "RetinalDistill"),
-            project=os.environ.get("WANDB_PROJECT", "CarnaticSpeeter"),
-            config=params,
-            resume="allow",
-            id=os.environ.get("WANDB_RUN_ID"),
-        )
+        try:
+            wandb_run = wandb.init(
+                entity=os.environ.get("WANDB_ENTITY", "RetinalDistill"),
+                project=os.environ.get("WANDB_PROJECT", "CarnaticSpeeter"),
+                config=params,
+                resume="allow",
+                id=os.environ.get("WANDB_RUN_ID"),
+            )
+            logger.info("wandb run: %s", wandb_run.get_url() if wandb_run else "(none)")
+        except Exception as e:  # noqa: BLE001
+            logger.warning("wandb.init failed (%s: %s); training will continue without wandb logging.",
+                           type(e).__name__, e)
+            logger.warning("Tip: try `uv pip install --upgrade 'click>=8.1.7'` or pass --no_wandb.")
+            wandb_run = None
 
     autocast_ctx_fn = (
         (lambda: torch.autocast(device_type=device.type, dtype=torch.bfloat16))
@@ -277,10 +284,35 @@ def main() -> int:
     # stops early and still writes the final epoch checkpoint + best.pt.
     max_steps = int(params.get("train_max_steps", 0)) or None
 
+    steps_per_epoch = len(train_loader)
+    val_batches = len(val_loader)
+    total_planned_steps = steps_per_epoch * max_epochs
     logger.info(
         "Starting training: max_epochs=%d batch_size=%s lr=%s bf16=%s device=%s",
         max_epochs, params.get("batch_size", 4), params["learning_rate"], use_bf16, device,
     )
+    logger.info(
+        "Dataset: %d train samples (%d batches/epoch) | %d val samples (%d val batches/epoch)",
+        len(train_loader.dataset), steps_per_epoch,
+        len(val_loader.dataset), val_batches,
+    )
+    logger.info(
+        "Schedule: %d steps/epoch x %d epochs = %d total opt steps; log every %d step(s)",
+        steps_per_epoch, max_epochs, total_planned_steps, summary_every,
+    )
+    if steps_per_epoch == 0:
+        logger.error(
+            "0 batches/epoch — batch_size (%d) is larger than train samples (%d) "
+            "and drop_last=True. Lower batch_size or n_chunks_per_song.",
+            params.get("batch_size", 4), len(train_loader.dataset),
+        )
+        return 1
+    if steps_per_epoch < 4:
+        logger.warning(
+            "Only %d optimizer step(s) per epoch — model will barely move per epoch. "
+            "Consider lowering batch_size (currently %s) or raising n_chunks_per_song.",
+            steps_per_epoch, params.get("batch_size", 4),
+        )
 
     try:
         for epoch in range(start_epoch, max_epochs):
